@@ -696,6 +696,69 @@ func TestDefaultClientDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
+func TestInjectedHTTPClientDoesNotFollowRedirectsOrMutateCallerPolicy(t *testing.T) {
+	t.Parallel()
+
+	var redirectedCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/capture":
+			writer.Header().Set("Location", "/redirected")
+			writer.WriteHeader(http.StatusFound)
+			_, _ = writer.Write([]byte("redirect"))
+		case "/redirected":
+			redirectedCalls.Add(1)
+			writer.WriteHeader(http.StatusOK)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	var callerRedirectPolicyCalls atomic.Int32
+	httpClient := &http.Client{
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			callerRedirectPolicyCalls.Add(1)
+			return nil
+		},
+	}
+	client, err := NewClient("key", &ClientOptions{
+		BaseURL:    server.URL,
+		HTTPClient: httpClient,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.Capture(context.Background(), "https://example.com", nil)
+	var apiError *APIError
+	if !errors.As(err, &apiError) || apiError.StatusCode != http.StatusFound {
+		t.Fatalf("expected raw redirect API error, got %v", err)
+	}
+	if redirectedCalls.Load() != 0 {
+		t.Fatalf("SDK request followed redirect %d times", redirectedCalls.Load())
+	}
+	if callerRedirectPolicyCalls.Load() != 0 {
+		t.Fatalf("SDK request used caller redirect policy %d times", callerRedirectPolicyCalls.Load())
+	}
+
+	response, err := httpClient.Get(server.URL + "/v1/capture")
+	if err != nil {
+		t.Fatalf("caller-owned client: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("caller-owned client status: %d", response.StatusCode)
+	}
+	if callerRedirectPolicyCalls.Load() != 1 || redirectedCalls.Load() != 1 {
+		t.Fatalf(
+			"caller-owned redirect behavior changed: policy calls=%d, redirected calls=%d",
+			callerRedirectPolicyCalls.Load(),
+			redirectedCalls.Load(),
+		)
+	}
+}
+
 func TestTransportFailureRetainsNativeCauseAndIsNotRetried(t *testing.T) {
 	t.Parallel()
 

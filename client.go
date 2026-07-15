@@ -69,13 +69,13 @@ func NewClient(accessKey string, options *ClientOptions) (*Client, error) {
 		return nil, err
 	}
 
-	httpClient := configuration.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+	httpClient := &http.Client{}
+	if configuration.HTTPClient != nil {
+		clonedHTTPClient := *configuration.HTTPClient
+		httpClient = &clonedHTTPClient
+	}
+	httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 
 	return &Client{

@@ -204,7 +204,7 @@ The SDK never derives the service timeout from a context or request timeout. Con
 - `RequestTimeout`: optional per-call caller-side deadline; zero disables the SDK-owned deadline
 - `HTTPClient`: optional reusable `*http.Client`
 
-The built-in client does not follow redirects. An injected `http.Client` remains caller-owned and follows its own transport, timeout, and redirect configuration.
+The SDK does not follow redirects, including when an `http.Client` is injected. It shallow-copies the injected client and overrides the copy's redirect policy, so the caller-owned client is not mutated. The injected transport, cookie jar, and timeout remain in use.
 
 ```go
 httpClient := &http.Client{Timeout: 5 * time.Minute}
