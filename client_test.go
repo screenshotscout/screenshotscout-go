@@ -84,9 +84,6 @@ func TestNewClientValidatesConfiguration(t *testing.T) {
 		{name: "blank access key", accessKey: "   "},
 		{name: "invalid bearer credential", accessKey: "key with spaces"},
 		{name: "blank secret key", accessKey: "key", options: &ClientOptions{SecretKey: "   "}},
-		{name: "relative base URL", accessKey: "key", options: &ClientOptions{BaseURL: "/api"}},
-		{name: "base URL query", accessKey: "key", options: &ClientOptions{BaseURL: "https://api.example?x=1"}},
-		{name: "negative request timeout", accessKey: "key", options: &ClientOptions{RequestTimeout: -time.Second}},
 	}
 
 	for _, test := range tests {
@@ -106,7 +103,7 @@ func TestNewClientValidatesConfiguration(t *testing.T) {
 		})
 	}
 
-	client, err := NewClient("key", &ClientOptions{BaseURL: "https://api.example/prefix/"})
+	client, err := NewClient("key", nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -114,7 +111,7 @@ func TestNewClientValidatesConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCaptureURL: %v", err)
 	}
-	if !strings.HasPrefix(built, "https://api.example/prefix/v1/capture?") {
+	if !strings.HasPrefix(built, captureEndpointURL+"?") {
 		t.Fatalf("unexpected capture endpoint: %s", built)
 	}
 }
@@ -125,10 +122,7 @@ func TestCapturePOSTSerializesCompleteOptionSurface(t *testing.T) {
 	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
 	})
-	client, err := NewClient("access-key", &ClientOptions{
-		BaseURL:    "https://api.example/prefix",
-		HTTPClient: httpClient,
-	})
+	client, err := NewClient("access-key", &ClientOptions{HTTPClient: httpClient})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -231,7 +225,7 @@ func TestCapturePOSTSerializesCompleteOptionSurface(t *testing.T) {
 	if recorded.method != http.MethodPost {
 		t.Fatalf("expected POST, got %s", recorded.method)
 	}
-	if recorded.url != "https://api.example/prefix/v1/capture" {
+	if recorded.url != captureEndpointURL {
 		t.Fatalf("unexpected URL: %s", recorded.url)
 	}
 	if recorded.header.Get("Authorization") != "Bearer access-key" {
@@ -682,10 +676,11 @@ func TestDefaultClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewClient("key", &ClientOptions{BaseURL: server.URL})
+	client, err := NewClient("key", nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	client.endpoint = server.URL + "/v1/capture"
 	_, err = client.Capture(context.Background(), "https://example.com", nil)
 	var apiError *APIError
 	if !errors.As(err, &apiError) || apiError.StatusCode != http.StatusFound {
@@ -722,13 +717,11 @@ func TestInjectedHTTPClientDoesNotFollowRedirectsOrMutateCallerPolicy(t *testing
 			return nil
 		},
 	}
-	client, err := NewClient("key", &ClientOptions{
-		BaseURL:    server.URL,
-		HTTPClient: httpClient,
-	})
+	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	client.endpoint = server.URL + "/v1/capture"
 
 	_, err = client.Capture(context.Background(), "https://example.com", nil)
 	var apiError *APIError
@@ -786,7 +779,7 @@ func TestTransportFailureRetainsNativeCauseAndIsNotRetried(t *testing.T) {
 	}
 }
 
-func TestContextCancellationAndRequestTimeoutAreNotWrapped(t *testing.T) {
+func TestContextCancellationAndDeadlineAreNotWrapped(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
@@ -795,7 +788,7 @@ func TestContextCancellationAndRequestTimeoutAreNotWrapped(t *testing.T) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
 	})}
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient, RequestTimeout: 10 * time.Millisecond})
+	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -810,7 +803,9 @@ func TestContextCancellationAndRequestTimeoutAreNotWrapped(t *testing.T) {
 		t.Fatal("pre-canceled context called the transport")
 	}
 
-	_, err = client.Capture(context.Background(), "https://example.com", nil)
+	deadlineContext, deadlineCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer deadlineCancel()
+	_, err = client.Capture(deadlineContext, "https://example.com", nil)
 	if err != context.DeadlineExceeded {
 		t.Fatalf("expected direct context.DeadlineExceeded, got %v", err)
 	}

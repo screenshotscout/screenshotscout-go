@@ -7,10 +7,7 @@ import (
 )
 
 func ExampleClient_BuildCaptureURL() {
-	client, err := screenshotscout.NewClient(
-		"ak_test",
-		&screenshotscout.ClientOptions{BaseURL: "https://api.example"},
-	)
+	client, err := screenshotscout.NewClient("ak_test", nil)
 	if err != nil {
 		panic(err)
 	}
@@ -24,5 +21,5 @@ func ExampleClient_BuildCaptureURL() {
 	}
 	fmt.Println(captureURL)
 	// Output:
-	// https://api.example/v1/capture?access_key=ak_test&url=https%3A%2F%2Fexample.com&full_page=true
+	// https://api.screenshotscout.com/v1/capture?access_key=ak_test&url=https%3A%2F%2Fexample.com&full_page=true
 }

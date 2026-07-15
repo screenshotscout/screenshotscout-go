@@ -2,13 +2,9 @@
 
 The official Go SDK for the [Screenshot Scout](https://screenshotscout.com/) screenshot API.
 
-The SDK is a small, synchronous wrapper around the inline `GET` and `POST /v1/capture` operation. `Capture` blocks until Screenshot Scout returns the final screenshot response. Applications that want concurrent calls can use ordinary goroutines and contexts.
-
 ## Requirements
 
 - Go 1.25 or newer
-
-The initial support policy covers the latest two stable Go releases. Supported versions are rechecked before publication.
 
 ## Installation
 
@@ -23,6 +19,8 @@ Before using the SDK, [sign up for Screenshot Scout](https://screenshotscout.com
 The access key is required by `NewClient`. The optional secret key enables [signed requests](#signed-requests). The SDK never reads either credential from environment variables on its own; applications pass credentials explicitly.
 
 ## Capture a screenshot
+
+`Capture` waits until Screenshot Scout returns the final screenshot response.
 
 ```go
 package main
@@ -69,13 +67,11 @@ func main() {
 
 ```go
 responseType := screenshotscout.CaptureResponseTypeJSON
-cache := true
 response, err := client.Capture(
 	context.Background(),
 	"https://example.com",
 	&screenshotscout.CaptureOptions{
 		ResponseType: &responseType,
-		Cache:        &cache,
 	},
 )
 if err != nil {
@@ -94,7 +90,7 @@ if result.ScreenshotURL != nil {
 
 ## Use GET
 
-POST is the default. Supply one closed `CaptureHTTPMethod` value to select GET for a call:
+POST is the default. Pass `CaptureHTTPMethodGET` as the final argument to use GET for a call:
 
 ```go
 format := screenshotscout.CaptureFormatWEBP
@@ -106,7 +102,7 @@ response, err := client.Capture(
 )
 ```
 
-The method selector is separate from `CaptureOptions`. Supplying any value other than `CaptureHTTPMethodGET` or `CaptureHTTPMethodPOST` returns a `SerializationError`. The SDK never changes methods after an error.
+The method selector is separate from `CaptureOptions`. Supplying any value other than `CaptureHTTPMethodGET` or `CaptureHTTPMethodPOST` returns a `SerializationError`.
 
 ## Build a capture URL
 
@@ -141,11 +137,11 @@ client, err := screenshotscout.NewClient(
 )
 ```
 
-The client signs its first and only GET or POST attempt and every generated capture URL using Screenshot Scout's current HMAC-SHA256 canonical-query algorithm. See the [signed requests guide](https://screenshotscout.com/docs/signed-requests).
+When a secret key is configured, the client signs capture requests and generated capture URLs automatically. See the [signed requests guide](https://screenshotscout.com/docs/signed-requests).
 
 ## Capture options
 
-The target URL is the required second argument to `Capture` and the first argument to `BuildCaptureURL`. `CaptureOptions` contains every current service option using idiomatic Go names:
+The target URL is the required second argument to `Capture` and the first argument to `BuildCaptureURL`. `CaptureOptions` provides the supported screenshot options:
 
 - Output: `Format`, `ResponseType`
 - Network and location: `Country`, `Proxy`, `GeolocationLatitude`, `GeolocationLongitude`, `GeolocationAccuracy`
@@ -164,21 +160,20 @@ The target URL is the required second argument to `Capture` and the first argume
 
 Scalar fields are pointers. `nil` omits an option, while pointers to `""`, `false`, or zero transmit those values exactly. Empty repeated slices are omitted; non-empty slices preserve caller order and duplicates.
 
-Documented service values have named string types and constants for discoverability, while future or raw strings remain possible through explicit conversion:
+Documented string values are available as constants. You can also pass a value that does not have a constant by using an explicit conversion:
 
 ```go
 documented := screenshotscout.CaptureFormatWEBP
 future := screenshotscout.CaptureFormat("future-format")
 ```
 
-The SDK does not validate target URLs, service enums, ranges, option dependencies, plan permissions, selectors, proxies, or storage settings. Screenshot Scout remains authoritative for those rules. See the [screenshot option reference](https://screenshotscout.com/docs/screenshot-options).
+Screenshot Scout validates target URLs and option values. Invalid or incompatible values are returned as API errors. See the [screenshot option reference](https://screenshotscout.com/docs/screenshot-options).
 
 ## Timeouts and cancellation
 
-Three independent controls are available:
+Use goroutines for concurrent captures. For timing and cancellation, two independent controls are available:
 
 - `CaptureOptions.Timeout` is the Screenshot Scout service-side capture budget in seconds.
-- `ClientOptions.RequestTimeout` is an optional SDK-owned caller-side deadline applied to every request.
 - The required `context.Context` controls each call and is the preferred place for call-specific deadlines or cancellation.
 
 ```go
@@ -193,18 +188,16 @@ response, err := client.Capture(
 )
 ```
 
-The SDK never derives the service timeout from a context or request timeout. Context cancellation returns `context.Canceled` or `context.DeadlineExceeded` directly rather than wrapping it in a transport error.
+These controls are independent. Cancellation returns `context.Canceled` or `context.DeadlineExceeded`, which can be checked with `errors.Is`.
 
 ## Client configuration and custom HTTP transport
 
 `ClientOptions` supports:
 
 - `SecretKey`: optional signing secret
-- `BaseURL`: optional base URL; defaults to `https://api.screenshotscout.com`
-- `RequestTimeout`: optional per-call caller-side deadline; zero disables the SDK-owned deadline
 - `HTTPClient`: optional reusable `*http.Client`
 
-The SDK does not follow redirects, including when an `http.Client` is injected. It shallow-copies the injected client and overrides the copy's redirect policy, so the caller-owned client is not mutated. The injected transport, cookie jar, and timeout remain in use.
+SDK requests do not follow redirects. An injected client's transport, cookie jar, and timeout remain in use, and the caller-owned client is not modified.
 
 ```go
 httpClient := &http.Client{Timeout: 5 * time.Minute}
@@ -214,11 +207,11 @@ client, err := screenshotscout.NewClient(
 )
 ```
 
-The SDK adds no application-level retries, caching, polling, persistence, method switching, logging, or telemetry, and it never follows a returned screenshot URL automatically.
+`Capture` does not retry failed requests automatically or fetch a returned screenshot URL.
 
 ## Raw responses and errors
 
-Every successful `CaptureResponse` includes `RawResponse`, with the status code and status text, multi-value headers, exact content type, and buffered body bytes. `APIError` and `ResponseDecodingError` retain the same raw response.
+Every successful `CaptureResponse` includes `RawResponse`, with the HTTP status, headers, content type, and body bytes. `APIError` and `ResponseDecodingError` provide the same response details.
 
 Five error categories are available as concrete types and `errors.Is` sentinels:
 
@@ -255,13 +248,6 @@ if err != nil {
 ```
 
 `TransportError` unwraps the native HTTP cause. `APIError.ResponseBody` retains the complete decoded JSON value when the failure body is valid JSON, including unrecognized fields.
-
-## Development
-
-```sh
-go test ./...
-go vet ./...
-```
 
 ## License
 

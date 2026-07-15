@@ -1,9 +1,6 @@
 package screenshotscout
 
-import (
-	"net/http"
-	"time"
-)
+import "net/http"
 
 // CaptureHTTPMethod is the closed, SDK-owned HTTP method selector for Capture.
 type CaptureHTTPMethod string
@@ -207,13 +204,10 @@ type CaptureOptions struct {
 	StorageObjectKey *string
 }
 
-// ClientOptions configures a reusable Client. Zero values select the
-// production endpoint, no SDK-owned request deadline, and no signing.
+// ClientOptions configures signing and HTTP transport for a reusable Client.
 type ClientOptions struct {
-	SecretKey      string
-	BaseURL        string
-	RequestTimeout time.Duration
-	HTTPClient     *http.Client
+	SecretKey  string
+	HTTPClient *http.Client
 }
 
 // CaptureResponseKind identifies which CaptureResponse member is populated.

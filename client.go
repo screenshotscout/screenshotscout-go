@@ -6,27 +6,23 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
-const defaultBaseURL = "https://api.screenshotscout.com"
+const captureEndpointURL = "https://api.screenshotscout.com/v1/capture"
 
 var accessKeyPattern = regexp.MustCompile(`^[A-Za-z0-9\-._~+/]+=*$`)
 
 // Client is a reusable Screenshot Scout API client.
 type Client struct {
-	accessKey      string
-	secretKey      string
-	endpoint       string
-	requestTimeout time.Duration
-	httpClient     *http.Client
+	accessKey  string
+	secretKey  string
+	endpoint   string
+	httpClient *http.Client
 }
 
 // NewClient creates a reusable client. The access key is configured once and
@@ -54,21 +50,6 @@ func NewClient(accessKey string, options *ClientOptions) (*Client, error) {
 			}
 		}
 	}
-	if configuration.RequestTimeout < 0 {
-		return nil, &ConfigurationError{
-			Message: "RequestTimeout must not be negative.",
-		}
-	}
-
-	baseURL := configuration.BaseURL
-	if baseURL == "" {
-		baseURL = defaultBaseURL
-	}
-	endpoint, err := captureEndpoint(baseURL)
-	if err != nil {
-		return nil, err
-	}
-
 	httpClient := &http.Client{}
 	if configuration.HTTPClient != nil {
 		clonedHTTPClient := *configuration.HTTPClient
@@ -79,11 +60,10 @@ func NewClient(accessKey string, options *ClientOptions) (*Client, error) {
 	}
 
 	return &Client{
-		accessKey:      accessKey,
-		secretKey:      configuration.SecretKey,
-		endpoint:       endpoint,
-		requestTimeout: configuration.RequestTimeout,
-		httpClient:     httpClient,
+		accessKey:  accessKey,
+		secretKey:  configuration.SecretKey,
+		endpoint:   captureEndpointURL,
+		httpClient: httpClient,
 	}, nil
 }
 
@@ -116,16 +96,6 @@ func (client *Client) Capture(
 		return nil, err
 	}
 
-	requestContext := ctx
-	cancel := func() {}
-	if client.requestTimeout > 0 {
-		requestContext, cancel = context.WithTimeout(ctx, client.requestTimeout)
-	}
-	defer cancel()
-	if err := requestContext.Err(); err != nil {
-		return nil, err
-	}
-
 	signature := client.createSignature(serialized.pairs)
 	requestURL := client.endpoint
 	var body io.Reader
@@ -150,7 +120,7 @@ func (client *Client) Capture(
 		body = bytes.NewReader(encodedBody)
 	}
 
-	request, err := http.NewRequestWithContext(requestContext, string(captureMethod), requestURL, body)
+	request, err := http.NewRequestWithContext(ctx, string(captureMethod), requestURL, body)
 	if err != nil {
 		return nil, &SerializationError{
 			Message: "The Screenshot Scout HTTP request could not be constructed.",
@@ -164,7 +134,7 @@ func (client *Client) Capture(
 
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		if contextErr := requestContext.Err(); contextErr != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
 			return nil, contextErr
 		}
 		return nil, &TransportError{
@@ -176,7 +146,7 @@ func (client *Client) Capture(
 
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
-		if contextErr := requestContext.Err(); contextErr != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
 			return nil, contextErr
 		}
 		return nil, &TransportError{
@@ -226,39 +196,4 @@ func (client *Client) createSignature(pairs []wirePair) string {
 	mac := hmac.New(sha256.New, []byte(client.secretKey))
 	_, _ = mac.Write([]byte(canonicalQuery))
 	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func captureEndpoint(baseURL string) (string, error) {
-	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(baseURL) != baseURL {
-		return "", &ConfigurationError{
-			Message: "BaseURL must be a non-blank absolute HTTP or HTTPS URL.",
-		}
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		return "", &ConfigurationError{
-			Message: "BaseURL must be a non-blank absolute HTTP or HTTPS URL.",
-			Cause:   err,
-		}
-	}
-	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Opaque != "" {
-		return "", &ConfigurationError{
-			Message: "BaseURL must be a non-blank absolute HTTP or HTTPS URL.",
-		}
-	}
-	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", &ConfigurationError{
-			Message: "BaseURL must not contain a query string or fragment.",
-		}
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v1/capture"
-	parsed.RawPath = ""
-	endpoint := parsed.String()
-	if endpoint == "" {
-		return "", &ConfigurationError{
-			Message: "BaseURL could not be converted to a capture endpoint.",
-			Cause:   fmt.Errorf("empty endpoint"),
-		}
-	}
-	return endpoint, nil
 }
