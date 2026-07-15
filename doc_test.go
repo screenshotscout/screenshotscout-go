@@ -1,0 +1,1 @@
+package screenshotscout_test
