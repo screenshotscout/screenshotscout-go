@@ -173,6 +173,9 @@ func serializeCaptureOptions(targetURL string, options *CaptureOptions) (seriali
 			return appendStringOption(serializer, "PDFMarginLeft", "pdf_margin_left", options.PDFMarginLeft)
 		},
 		func() error { return serializer.appendFloat("PDFScale", "pdf_scale", options.PDFScale) },
+		func() error {
+			return appendStringOption(serializer, "PDFPageRanges", "pdf_page_ranges", options.PDFPageRanges)
+		},
 		func() error { serializer.appendBool("Cache", "cache", options.Cache); return nil },
 		func() error { return serializer.appendInt("CacheTTL", "cache_ttl", options.CacheTTL) },
 		func() error { return appendStringOption(serializer, "CacheKey", "cache_key", options.CacheKey) },

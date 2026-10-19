@@ -154,7 +154,7 @@ The target URL is the required second argument to `Capture` and the first argume
 - DOM changes: `HideSelectors`, `ClickSelectors`, `ClickAllSelectors`, `InjectCSS`, `InjectJS`, `BypassCSP`
 - Framing: `Selector`, `ClipX`, `ClipY`, `ClipWidth`, `ClipHeight`
 - Image output: `ImageWidth`, `ImageHeight`, `ImageMode`, `ImageAnchor`, `ImageAllowUpscale`, `ImageBackground`, `ImageQuality`
-- PDF: `PDFPaperFormat`, `PDFLandscape`, `PDFPrintBackground`, `PDFMargin`, `PDFMarginTop`, `PDFMarginRight`, `PDFMarginBottom`, `PDFMarginLeft`, `PDFScale`
+- PDF: `PDFPaperFormat`, `PDFLandscape`, `PDFPrintBackground`, `PDFMargin`, `PDFMarginTop`, `PDFMarginRight`, `PDFMarginBottom`, `PDFMarginLeft`, `PDFScale`, `PDFPageRanges`
 - Caching: `Cache`, `CacheTTL`, `CacheKey`
 - Storage: `StorageMode`, `StorageEndpoint`, `StorageBucket`, `StorageRegion`, `StorageObjectKey`
 

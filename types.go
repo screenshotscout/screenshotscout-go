@@ -88,7 +88,8 @@ type CapturePDFPaperFormat string
 const (
 	CapturePDFPaperFormatA3      CapturePDFPaperFormat = "a3"
 	CapturePDFPaperFormatA4      CapturePDFPaperFormat = "a4"
-	CapturePDFPaperFormatContent CapturePDFPaperFormat = "content"
+	CapturePDFPaperFormatA5      CapturePDFPaperFormat = "a5"
+	CapturePDFPaperFormatA6      CapturePDFPaperFormat = "a6"
 	CapturePDFPaperFormatLegal   CapturePDFPaperFormat = "legal"
 	CapturePDFPaperFormatLetter  CapturePDFPaperFormat = "letter"
 	CapturePDFPaperFormatTabloid CapturePDFPaperFormat = "tabloid"
@@ -190,6 +191,7 @@ type CaptureOptions struct {
 	PDFMarginBottom    *string
 	PDFMarginLeft      *string
 	PDFScale           *float64
+	PDFPageRanges      *string
 
 	// Caching.
 	Cache    *bool
