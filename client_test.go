@@ -315,7 +315,7 @@ func TestOmittedOptionsDoNotInsertServiceDefaults(t *testing.T) {
 	}
 }
 
-func TestGETAndCaptureURLPreserveOrderAndUseWHATWGEncoding(t *testing.T) {
+func TestGETAndCaptureURLPreserveOrderAndUseRFC3986Encoding(t *testing.T) {
 	t.Parallel()
 
 	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
@@ -353,7 +353,7 @@ func TestGETAndCaptureURLPreserveOrderAndUseWHATWGEncoding(t *testing.T) {
 	if recorded.header.Get("Content-Type") != "" {
 		t.Fatalf("GET request unexpectedly had Content-Type: %s", recorded.header.Get("Content-Type"))
 	}
-	const expectedQuery = "url=https%3A%2F%2Fexample.com%2Fa+path%3Fx%3D%7E*&cookies=a%3D1&cookies=a%3D1&headers=X-Test%3Aone&headers=X-Test%3Aone&delay=0&full_page=false&cache_key="
+	const expectedQuery = "url=https%3A%2F%2Fexample.com%2Fa%20path%3Fx%3D~%2A&cookies=a%3D1&cookies=a%3D1&headers=X-Test%3Aone&headers=X-Test%3Aone&delay=0&full_page=false&cache_key="
 	if !strings.HasSuffix(recorded.url, "?"+expectedQuery) {
 		t.Fatalf("unexpected GET URL: %s", recorded.url)
 	}
@@ -394,13 +394,10 @@ func TestSigningMatchesCurrentAPIAlgorithm(t *testing.T) {
 		Headers:      []string{"X-Test:one", "X-Test:two"},
 	}
 	target := "https://example.com/a b?x=1&y=2"
-	const expectedSignature = "0c4928ba691575903f27b911b8ea1a536604ca070d60d886e10c127c05e236fc"
+	const expectedSignature = "6419f2ac8c0440f1e341b547630606c9dc74dacfbb2df8e122fc9ae26831d893"
 
 	if _, err := client.Capture(context.Background(), target, options, CaptureHTTPMethodGET); err != nil {
 		t.Fatalf("signed GET: %v", err)
-	}
-	if _, err := client.Capture(context.Background(), target, options, CaptureHTTPMethodPOST); err != nil {
-		t.Fatalf("signed POST: %v", err)
 	}
 	built, err := client.BuildCaptureURL(target, options)
 	if err != nil {
@@ -413,13 +410,6 @@ func TestSigningMatchesCurrentAPIAlgorithm(t *testing.T) {
 	}
 	if getURL.URL.Query().Get("signature") != expectedSignature {
 		t.Fatalf("unexpected GET signature: %s", getURL.URL.Query().Get("signature"))
-	}
-	var postBody map[string]any
-	if err := json.Unmarshal((*requests)[1].body, &postBody); err != nil {
-		t.Fatalf("decode signed POST: %v", err)
-	}
-	if postBody["signature"] != expectedSignature {
-		t.Fatalf("unexpected POST signature: %v", postBody["signature"])
 	}
 	builtRequest, err := http.NewRequest(http.MethodGet, built, nil)
 	if err != nil {
@@ -437,8 +427,46 @@ func TestSigningMatchesCurrentAPIAlgorithm(t *testing.T) {
 	if getURL.URL.Query().Has("access_key") {
 		t.Fatal("executed GET included access_key")
 	}
-	if _, present := postBody["access_key"]; present {
-		t.Fatal("executed POST included access_key")
+}
+
+func TestPOSTWithSecretKeyFailsBeforeTransport(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil), nil
+	})}
+	client, err := NewClient("ak_test", &ClientOptions{SecretKey: "sk_test", HTTPClient: httpClient})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	const expectedMessage = "POST requests can't be signed. This client has a secret key: send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests."
+	tests := []struct {
+		name   string
+		method []CaptureHTTPMethod
+	}{
+		{name: "omitted method"},
+		{name: "explicit POST", method: []CaptureHTTPMethod{CaptureHTTPMethodPOST}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := client.Capture(context.Background(), "https://example.com", nil, test.method...)
+			if !errors.Is(err, ErrConfiguration) {
+				t.Fatalf("expected configuration category, got %v", err)
+			}
+			var configurationError *ConfigurationError
+			if !errors.As(err, &configurationError) {
+				t.Fatalf("expected ConfigurationError, got %T", err)
+			}
+			if configurationError.Message != expectedMessage {
+				t.Fatalf("unexpected message: %s", configurationError.Message)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("POST with a secret key reached transport %d times", calls.Load())
 	}
 }
 

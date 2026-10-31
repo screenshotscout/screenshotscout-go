@@ -14,9 +14,7 @@ func main() {
 	if accessKey == "" {
 		log.Fatal("set SCREENSHOTSCOUT_ACCESS_KEY first")
 	}
-	client, err := screenshotscout.NewClient(accessKey, &screenshotscout.ClientOptions{
-		SecretKey: os.Getenv("SCREENSHOTSCOUT_SECRET_KEY"),
-	})
+	client, err := screenshotscout.NewClient(accessKey, nil)
 	if err != nil {
 		log.Fatal(err)
 	}

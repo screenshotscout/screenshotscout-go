@@ -70,6 +70,9 @@ func NewClient(accessKey string, options *ClientOptions) (*Client, error) {
 // Capture performs one inline Screenshot Scout request and waits for the final
 // buffered response. POST is used when method is omitted. At most one method
 // may be supplied, and it must be CaptureHTTPMethodGET or CaptureHTTPMethodPOST.
+// A configured secret key signs GET requests. POST requests can't be signed, so
+// a client with a secret key returns a ConfigurationError for POST without
+// sending a request and must pass CaptureHTTPMethodGET.
 // Cancellation follows the supplied context's normal semantics.
 func (client *Client) Capture(
 	ctx context.Context,
@@ -92,28 +95,25 @@ func (client *Client) Capture(
 	if err != nil {
 		return nil, err
 	}
+	if captureMethod == CaptureHTTPMethodPOST && client.secretKey != "" {
+		return nil, &ConfigurationError{
+			Message: "POST requests can't be signed. This client has a secret key: send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests.",
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	signature := client.createSignature(serialized.pairs)
 	requestURL := client.endpoint
 	var body io.Reader
 	if captureMethod == CaptureHTTPMethodGET {
 		pairs := append([]wirePair(nil), serialized.pairs...)
-		if signature != "" {
+		if signature := client.createSignature(serialized.pairs); signature != "" {
 			pairs = append(pairs, wirePair{name: "signature", value: signature})
 		}
 		requestURL += "?" + encodeQueryPairs(pairs)
 	} else {
-		bodyValues := make(map[string]any, len(serialized.body)+1)
-		for name, value := range serialized.body {
-			bodyValues[name] = value
-		}
-		if signature != "" {
-			bodyValues["signature"] = signature
-		}
-		encodedBody, encodeErr := encodeJSONBody(bodyValues)
+		encodedBody, encodeErr := encodeJSONBody(serialized.body)
 		if encodeErr != nil {
 			return nil, encodeErr
 		}

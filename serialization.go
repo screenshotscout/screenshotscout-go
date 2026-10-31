@@ -317,14 +317,14 @@ func encodeQueryPairs(pairs []wirePair) string {
 		if index > 0 {
 			builder.WriteByte('&')
 		}
-		builder.WriteString(formEncodeComponent(pair.name))
+		builder.WriteString(encodeRFC3986(pair.name))
 		builder.WriteByte('=')
-		builder.WriteString(formEncodeComponent(pair.value))
+		builder.WriteString(encodeRFC3986(pair.value))
 	}
 	return builder.String()
 }
 
-func formEncodeComponent(value string) string {
+func encodeRFC3986(value string) string {
 	const hex = "0123456789ABCDEF"
 	var builder strings.Builder
 	for index := 0; index < len(value); index++ {
@@ -333,10 +333,8 @@ func formEncodeComponent(value string) string {
 		case (char >= 'A' && char <= 'Z') ||
 			(char >= 'a' && char <= 'z') ||
 			(char >= '0' && char <= '9') ||
-			char == '*' || char == '-' || char == '.' || char == '_':
+			char == '-' || char == '.' || char == '_' || char == '~':
 			builder.WriteByte(char)
-		case char == ' ':
-			builder.WriteByte('+')
 		default:
 			builder.WriteByte('%')
 			builder.WriteByte(hex[char>>4])

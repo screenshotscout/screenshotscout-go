@@ -8,6 +8,6 @@ go run ./examples/json
 go run ./examples/capture-url
 ```
 
-Set `SCREENSHOTSCOUT_SECRET_KEY` as well when signed requests are enabled for the API key.
+The `capture-url` example also reads `SCREENSHOTSCOUT_SECRET_KEY` and signs the URL when it is set.
 
 The example applications read their own environment and pass credentials explicitly. The SDK itself never reads credentials from environment variables.

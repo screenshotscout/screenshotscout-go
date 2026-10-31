@@ -1,0 +1,95 @@
+{
+  "description": "Request-signing test vectors for Screenshot Scout (RFC 3986 signed text). The same file is copied unchanged into the gateway and every SDK; regenerate it in one place and copy it everywhere.",
+  "vectors": [
+    {
+      "name": "docs minimal URL",
+      "access_key": "YOUR_ACCESS_KEY",
+      "secret_key": "YOUR_SECRET_KEY",
+      "params": [
+        ["url", "https://example.com/"]
+      ],
+      "signed_text": "access_key=YOUR_ACCESS_KEY&url=https%3A%2F%2Fexample.com%2F",
+      "signature": "b56c41ea153c60ba222c177cd2a95ce343781d1d28ed8bbdc203a847a99752f4"
+    },
+    {
+      "name": "docs example: asterisk, tilde, spaces and repeated names",
+      "access_key": "YOUR_ACCESS_KEY",
+      "secret_key": "YOUR_SECRET_KEY",
+      "params": [
+        ["url", "https://example.com/"],
+        ["full_page", "true"],
+        ["hide_selectors", "[class*=\"cookie\"]"],
+        ["hide_selectors", "#header ~ .promo"]
+      ],
+      "signed_text": "access_key=YOUR_ACCESS_KEY&full_page=true&hide_selectors=%5Bclass%2A%3D%22cookie%22%5D&hide_selectors=%23header%20~%20.promo&url=https%3A%2F%2Fexample.com%2F",
+      "signature": "80f916fc5ec735c6c5c5c4898d5245e4e9f0ebe6d2c597a51113e1b945eefe36"
+    },
+    {
+      "name": "SDK interoperability vector",
+      "access_key": "ak_test",
+      "secret_key": "sk_test",
+      "params": [
+        ["url", "https://example.com/a b?x=1&y=2"],
+        ["full_page", "false"],
+        ["delay", "0"],
+        ["response_type", "json"],
+        ["headers", "X-Test:one"],
+        ["headers", "X-Test:two"]
+      ],
+      "signed_text": "access_key=ak_test&delay=0&full_page=false&headers=X-Test%3Aone&headers=X-Test%3Atwo&response_type=json&url=https%3A%2F%2Fexample.com%2Fa%20b%3Fx%3D1%26y%3D2",
+      "signature": "6419f2ac8c0440f1e341b547630606c9dc74dacfbb2df8e122fc9ae26831d893"
+    },
+    {
+      "name": "reserved characters",
+      "access_key": "ak_test",
+      "secret_key": "sk_test",
+      "params": [
+        ["url", "https://example.com/?q=a+b&x=1"],
+        ["cache_key", "a+b"],
+        ["inject_css", "body { width: 100%; }"],
+        ["inject_js", "alert('hi')!*"],
+        ["selector", "a[href=\"x&y\"]"]
+      ],
+      "signed_text": "access_key=ak_test&cache_key=a%2Bb&inject_css=body%20%7B%20width%3A%20100%25%3B%20%7D&inject_js=alert%28%27hi%27%29%21%2A&selector=a%5Bhref%3D%22x%26y%22%5D&url=https%3A%2F%2Fexample.com%2F%3Fq%3Da%2Bb%26x%3D1",
+      "signature": "070809e758cdee71a0a38601ba560b4aca9514b369cef50e81d19db0f162e6b8"
+    },
+    {
+      "name": "non-ASCII and an empty value",
+      "access_key": "ak_test",
+      "secret_key": "sk_test",
+      "params": [
+        ["url", "https://example.com/café"],
+        ["hide_selectors", "#price-€ 😀"],
+        ["cache_key", ""]
+      ],
+      "signed_text": "access_key=ak_test&cache_key=&hide_selectors=%23price-%E2%82%AC%20%F0%9F%98%80&url=https%3A%2F%2Fexample.com%2Fcaf%C3%A9",
+      "signature": "5c7f9d04a513b752ca6ff3980d7e38febb33c3cf1698eeff9b2b103c9076355a"
+    },
+    {
+      "name": "repeated names keep their original order",
+      "access_key": "ak_test",
+      "secret_key": "sk_test",
+      "params": [
+        ["click_selectors", "#second"],
+        ["url", "https://example.com/"],
+        ["click_selectors", "#first"],
+        ["click_selectors", "#first"]
+      ],
+      "signed_text": "access_key=ak_test&click_selectors=%23second&click_selectors=%23first&click_selectors=%23first&url=https%3A%2F%2Fexample.com%2F",
+      "signature": "978f6619c915ede782ab837c74b170a6871690a39a8c16d2d6f8b27c9d60b673"
+    },
+    {
+      "name": "names that share a prefix",
+      "access_key": "ak_test",
+      "secret_key": "sk_test",
+      "params": [
+        ["pdf_margin_top", "10px"],
+        ["url", "https://example.com/"],
+        ["pdf_margin", "5px"],
+        ["format", "pdf"]
+      ],
+      "signed_text": "access_key=ak_test&format=pdf&pdf_margin=5px&pdf_margin_top=10px&url=https%3A%2F%2Fexample.com%2F",
+      "signature": "7c7fc6429d8d53c64e1dd3830e0fe719e0a31fca8574214d5d26091cc6caab2f"
+    }
+  ]
+}

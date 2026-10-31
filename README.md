@@ -137,7 +137,18 @@ client, err := screenshotscout.NewClient(
 )
 ```
 
-When a secret key is configured, the client signs capture requests and generated capture URLs automatically. See the [signed requests guide](https://screenshotscout.com/docs/signed-requests).
+When a secret key is configured, the client signs generated capture URLs and GET requests automatically. POST requests can't be signed, so capture with `CaptureHTTPMethodGET`:
+
+```go
+response, err := client.Capture(
+	context.Background(),
+	"https://example.com",
+	nil,
+	screenshotscout.CaptureHTTPMethodGET,
+)
+```
+
+See the [signed requests guide](https://screenshotscout.com/docs/signed-requests).
 
 ## Capture options
 

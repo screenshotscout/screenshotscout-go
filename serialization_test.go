@@ -1,8 +1,11 @@
 package screenshotscout
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,9 +43,57 @@ func TestCanonicalQuerySortsNamesAndPreservesDuplicateOrder(t *testing.T) {
 		{name: "headers", value: "X-Test:two"},
 		{name: "delay", value: "0"},
 	}
-	want := "access_key=ak_test&delay=0&headers=X-Test%3Aone&headers=X-Test%3Atwo&url=https%3A%2F%2Fexample.com%2Fa+path%3Fx%3D%7E*"
+	want := "access_key=ak_test&delay=0&headers=X-Test%3Aone&headers=X-Test%3Atwo&url=https%3A%2F%2Fexample.com%2Fa%20path%3Fx%3D~%2A"
 	if got := buildCanonicalQuery(pairs, "ak_test"); got != want {
 		t.Fatalf("canonical query = %q, want %q", got, want)
+	}
+}
+
+// The same vectors are copied unchanged into the gateway and every SDK.
+func TestCanonicalQueryAndSignatureMatchSharedVectors(t *testing.T) {
+	t.Parallel()
+
+	contents, err := os.ReadFile(filepath.Join("testdata", "signing-vectors.json"))
+	if err != nil {
+		t.Fatalf("read signing vectors: %v", err)
+	}
+	var file struct {
+		Vectors []struct {
+			Name       string     `json:"name"`
+			AccessKey  string     `json:"access_key"`
+			SecretKey  string     `json:"secret_key"`
+			Params     [][]string `json:"params"`
+			SignedText string     `json:"signed_text"`
+			Signature  string     `json:"signature"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(contents, &file); err != nil {
+		t.Fatalf("decode signing vectors: %v", err)
+	}
+	if len(file.Vectors) == 0 {
+		t.Fatal("no signing vectors")
+	}
+	for _, vector := range file.Vectors {
+		t.Run(vector.Name, func(t *testing.T) {
+			t.Parallel()
+			pairs := make([]wirePair, 0, len(vector.Params))
+			for _, param := range vector.Params {
+				if len(param) != 2 {
+					t.Fatalf("param is not a [name, value] pair: %q", param)
+				}
+				pairs = append(pairs, wirePair{name: param[0], value: param[1]})
+			}
+			if signedText := buildCanonicalQuery(pairs, vector.AccessKey); signedText != vector.SignedText {
+				t.Fatalf("signed text = %q, want %q", signedText, vector.SignedText)
+			}
+			client, err := NewClient(vector.AccessKey, &ClientOptions{SecretKey: vector.SecretKey})
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			if signature := client.createSignature(pairs); signature != vector.Signature {
+				t.Fatalf("signature = %s, want %s", signature, vector.Signature)
+			}
+		})
 	}
 }
 
