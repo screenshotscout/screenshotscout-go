@@ -86,7 +86,7 @@ func TestCanonicalQueryAndSignatureMatchSharedVectors(t *testing.T) {
 			if signedText := buildCanonicalQuery(pairs, vector.AccessKey); signedText != vector.SignedText {
 				t.Fatalf("signed text = %q, want %q", signedText, vector.SignedText)
 			}
-			client, err := NewClient(vector.AccessKey, &ClientOptions{SecretKey: vector.SecretKey})
+			client, err := NewClient(WithAccessKey(vector.AccessKey), WithSecretKey(vector.SecretKey))
 			if err != nil {
 				t.Fatalf("NewClient: %v", err)
 			}

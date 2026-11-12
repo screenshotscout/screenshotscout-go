@@ -14,9 +14,9 @@ go get github.com/screenshotscout/screenshotscout-go
 
 ## Get your API credentials
 
-Before using the SDK, [sign up for Screenshot Scout](https://screenshotscout.com/auth/signup) or sign in to your account. Open the [API Keys page](https://screenshotscout.com/app/api-keys), then copy your access key and secret key.
+Before using the SDK, [sign up for Screenshot Scout](https://screenshotscout.com/auth/signup) or sign in to your account. Open the [API Keys page](https://screenshotscout.com/app/api-keys) and copy the access key. You only need the secret key for [signed requests](#signed-requests).
 
-The access key is required by `NewClient`. The optional secret key enables [signed requests](#signed-requests). The SDK never reads either credential from environment variables on its own; applications pass credentials explicitly.
+Set the access key as the `SCREENSHOTSCOUT_ACCESS_KEY` environment variable, or [pass it in code](#pass-the-keys-yourself).
 
 ## Capture a screenshot
 
@@ -34,12 +34,7 @@ import (
 )
 
 func main() {
-	accessKey := os.Getenv("SCREENSHOTSCOUT_ACCESS_KEY")
-	if accessKey == "" {
-		log.Fatal("set SCREENSHOTSCOUT_ACCESS_KEY first")
-	}
-
-	client, err := screenshotscout.NewClient(accessKey, nil)
+	client, err := screenshotscout.NewClient() // Reads SCREENSHOTSCOUT_ACCESS_KEY
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -61,7 +56,7 @@ func main() {
 }
 ```
 
-`Capture` uses POST by default. An omitted `ResponseType`, or an explicit `CaptureResponseTypeBinary`, expects a binary response.
+`Capture` uses POST by default, or GET when the client has a secret key. An omitted `ResponseType`, or an explicit `CaptureResponseTypeBinary`, expects a binary response.
 
 ## Request a JSON result
 
@@ -90,7 +85,7 @@ if result.ScreenshotURL != nil {
 
 ## Use GET
 
-POST is the default. Pass `CaptureHTTPMethodGET` as the final argument to use GET for a call:
+POST is the default, or GET when the client has a secret key. Pass `CaptureHTTPMethodGET` as the final argument to use GET for a call:
 
 ```go
 format := screenshotscout.CaptureFormatWEBP
@@ -128,27 +123,33 @@ The generated URL contains the access key. A configured secret key signs it auto
 
 ## Signed requests
 
-Pass the API key's secret key through `ClientOptions`. The secret is used locally and is never transmitted:
+Set the API key's secret key as the `SCREENSHOTSCOUT_SECRET_KEY` environment variable. The client then signs its capture requests and the capture URLs it builds, with no change to your code:
+
+```go
+client, err := screenshotscout.NewClient() // Reads SCREENSHOTSCOUT_ACCESS_KEY and SCREENSHOTSCOUT_SECRET_KEY
+if err != nil {
+	log.Fatal(err)
+}
+response, err := client.Capture(context.Background(), "https://example.com", nil)
+```
+
+The secret key is used locally and is never transmitted. See the [signed requests guide](https://screenshotscout.com/docs/signed-requests) for details.
+
+## Pass the keys yourself
+
+To use keys from somewhere other than the environment, such as a secrets manager or per-customer settings, pass them to `NewClient`:
 
 ```go
 client, err := screenshotscout.NewClient(
-	"YOUR_ACCESS_KEY",
-	&screenshotscout.ClientOptions{SecretKey: "YOUR_SECRET_KEY"},
+	screenshotscout.WithAccessKey(config.AccessKey),
+	screenshotscout.WithSecretKey(config.SecretKey), // optional
 )
+if err != nil {
+	log.Fatal(err)
+}
 ```
 
-When a secret key is configured, the client signs generated capture URLs and GET requests automatically. POST requests can't be signed, so capture with `CaptureHTTPMethodGET`:
-
-```go
-response, err := client.Capture(
-	context.Background(),
-	"https://example.com",
-	nil,
-	screenshotscout.CaptureHTTPMethodGET,
-)
-```
-
-See the [signed requests guide](https://screenshotscout.com/docs/signed-requests).
+If you pass either key, the client reads neither environment variable. A blank key, such as `WithSecretKey("")`, is an error, so leave out `WithSecretKey` when you have no secret key.
 
 ## Capture options
 
@@ -201,21 +202,14 @@ response, err := client.Capture(
 
 These controls are independent. Cancellation returns `context.Canceled` or `context.DeadlineExceeded`, which can be checked with `errors.Is`.
 
-## Client configuration and custom HTTP transport
+## Custom HTTP client
 
-`ClientOptions` supports:
-
-- `SecretKey`: optional signing secret
-- `HTTPClient`: optional reusable `*http.Client`
-
-SDK requests do not follow redirects. An injected client's transport, cookie jar, and timeout remain in use, and the caller-owned client is not modified.
+Pass `WithHTTPClient` to send requests through your own `*http.Client`. SDK requests do not follow redirects. An injected client's transport, cookie jar, and timeout remain in use, and the caller-owned client is not modified.
 
 ```go
 httpClient := &http.Client{Timeout: 5 * time.Minute}
-client, err := screenshotscout.NewClient(
-	"YOUR_ACCESS_KEY",
-	&screenshotscout.ClientOptions{HTTPClient: httpClient},
-)
+// Reads SCREENSHOTSCOUT_ACCESS_KEY
+client, err := screenshotscout.NewClient(screenshotscout.WithHTTPClient(httpClient))
 ```
 
 `Capture` does not retry failed requests automatically or fetch a returned screenshot URL.

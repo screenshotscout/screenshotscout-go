@@ -7,7 +7,7 @@ import (
 )
 
 func ExampleClient_BuildCaptureURL() {
-	client, err := screenshotscout.NewClient("ak_test", nil)
+	client, err := screenshotscout.NewClient(screenshotscout.WithAccessKey("ak_test"))
 	if err != nil {
 		panic(err)
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -19,15 +20,35 @@ var accessKeyPattern = regexp.MustCompile(`^[A-Za-z0-9\-._~+/]+=*$`)
 
 // Client is a reusable Screenshot Scout API client.
 type Client struct {
-	accessKey  string
-	secretKey  string
-	endpoint   string
-	httpClient *http.Client
+	accessKey                string
+	secretKey                string
+	secretKeyFromEnvironment bool
+	endpoint                 string
+	httpClient               *http.Client
 }
 
-// NewClient creates a reusable client. The access key is configured once and
-// is sent in the Authorization header for Capture calls.
-func NewClient(accessKey string, options *ClientOptions) (*Client, error) {
+// NewClient creates a reusable client. Without WithAccessKey or WithSecretKey,
+// it reads SCREENSHOTSCOUT_ACCESS_KEY and, if it's set,
+// SCREENSHOTSCOUT_SECRET_KEY. Passing either key means neither variable is
+// read. The access key is sent in the Authorization header for Capture calls,
+// and a secret key signs capture requests and capture URLs.
+func NewClient(options ...Option) (*Client, error) {
+	configuration := clientOptions{lookupEnv: os.LookupEnv}
+	for _, option := range options {
+		if option == nil {
+			return nil, &ConfigurationError{Message: "NewClient options must not be nil."}
+		}
+		option(&configuration)
+	}
+	credentials, err := resolveCredentials(configuration.accessKey, configuration.secretKey, configuration.lookupEnv)
+	if err != nil {
+		return nil, err
+	}
+
+	accessKey := ""
+	if credentials.accessKey != nil {
+		accessKey = *credentials.accessKey
+	}
 	if strings.TrimSpace(accessKey) == "" {
 		return nil, &ConfigurationError{
 			Message: "A non-blank Screenshot Scout access key is required.",
@@ -39,20 +60,18 @@ func NewClient(accessKey string, options *ClientOptions) (*Client, error) {
 		}
 	}
 
-	configuration := ClientOptions{}
-	if options != nil {
-		configuration = *options
-	}
-	if configuration.SecretKey != "" {
-		if strings.TrimSpace(configuration.SecretKey) == "" || !utf8.ValidString(configuration.SecretKey) {
+	secretKey := ""
+	if credentials.secretKey != nil {
+		secretKey = *credentials.secretKey
+		if strings.TrimSpace(secretKey) == "" || !utf8.ValidString(secretKey) {
 			return nil, &ConfigurationError{
 				Message: "The Screenshot Scout secret key must be a non-blank UTF-8 string when provided.",
 			}
 		}
 	}
 	httpClient := &http.Client{}
-	if configuration.HTTPClient != nil {
-		clonedHTTPClient := *configuration.HTTPClient
+	if configuration.httpClient != nil {
+		clonedHTTPClient := *configuration.httpClient
 		httpClient = &clonedHTTPClient
 	}
 	httpClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
@@ -60,20 +79,39 @@ func NewClient(accessKey string, options *ClientOptions) (*Client, error) {
 	}
 
 	return &Client{
-		accessKey:  accessKey,
-		secretKey:  configuration.SecretKey,
-		endpoint:   captureEndpointURL,
-		httpClient: httpClient,
+		accessKey:                accessKey,
+		secretKey:                secretKey,
+		secretKeyFromEnvironment: credentials.fromEnvironment && secretKey != "",
+		endpoint:                 captureEndpointURL,
+		httpClient:               httpClient,
 	}, nil
 }
 
+// String describes the client without revealing its keys.
+func (client Client) String() string {
+	return "screenshotscout.Client{accessKey:" + redactKey(client.accessKey) +
+		", secretKey:" + redactKey(client.secretKey) + "}"
+}
+
+// GoString returns the same description as String, for the %#v verb.
+func (client Client) GoString() string {
+	return client.String()
+}
+
+func redactKey(key string) string {
+	if key == "" {
+		return `""`
+	}
+	return `"[redacted]"`
+}
+
 // Capture performs one inline Screenshot Scout request and waits for the final
-// buffered response. POST is used when method is omitted. At most one method
-// may be supplied, and it must be CaptureHTTPMethodGET or CaptureHTTPMethodPOST.
-// A configured secret key signs GET requests. POST requests can't be signed, so
-// a client with a secret key returns a ConfigurationError for POST without
-// sending a request and must pass CaptureHTTPMethodGET.
-// Cancellation follows the supplied context's normal semantics.
+// buffered response. When method is omitted, Capture uses POST, or GET when the
+// client has a secret key. At most one method may be supplied, and it must be
+// CaptureHTTPMethodGET or CaptureHTTPMethodPOST. A configured secret key signs
+// GET requests. POST requests can't be signed, so a client with a secret key
+// returns a ConfigurationError for CaptureHTTPMethodPOST without sending a
+// request. Cancellation follows the supplied context's normal semantics.
 func (client *Client) Capture(
 	ctx context.Context,
 	targetURL string,
@@ -91,13 +129,22 @@ func (client *Client) Capture(
 	if err != nil {
 		return nil, err
 	}
-	captureMethod, err := resolveCaptureHTTPMethod(method)
+	// Without a method, a client that signs sends GET, because POST requests can't be signed.
+	defaultMethod := CaptureHTTPMethodPOST
+	if client.secretKey != "" {
+		defaultMethod = CaptureHTTPMethodGET
+	}
+	captureMethod, err := resolveCaptureHTTPMethod(method, defaultMethod)
 	if err != nil {
 		return nil, err
 	}
 	if captureMethod == CaptureHTTPMethodPOST && client.secretKey != "" {
+		source := ""
+		if client.secretKeyFromEnvironment {
+			source = " from " + secretKeyVariable
+		}
 		return nil, &ConfigurationError{
-			Message: "POST requests can't be signed. This client has a secret key: send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests.",
+			Message: "POST requests can't be signed. This client has a secret key" + source + ": send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests.",
 		}
 	}
 	if err := ctx.Err(); err != nil {

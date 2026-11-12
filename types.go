@@ -206,12 +206,6 @@ type CaptureOptions struct {
 	StorageObjectKey *string
 }
 
-// ClientOptions configures signing and HTTP transport for a reusable Client.
-type ClientOptions struct {
-	SecretKey  string
-	HTTPClient *http.Client
-}
-
 // CaptureResponseKind identifies which CaptureResponse member is populated.
 type CaptureResponseKind string
 

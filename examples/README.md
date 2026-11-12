@@ -8,6 +8,4 @@ go run ./examples/json
 go run ./examples/capture-url
 ```
 
-The `capture-url` example also reads `SCREENSHOTSCOUT_SECRET_KEY` and signs the URL when it is set.
-
-The example applications read their own environment and pass credentials explicitly. The SDK itself never reads credentials from environment variables.
+If `SCREENSHOTSCOUT_SECRET_KEY` is also set, the client signs its requests and the URL that `capture-url` prints.

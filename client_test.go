@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -73,37 +76,107 @@ func response(statusCode int, status, contentType string, body []byte, headers h
 
 func pointer[T any](value T) *T { return &value }
 
+// fakeEnvironment returns a lookup over values that records the names it reads.
+func fakeEnvironment(values map[string]string) (func(string) (string, bool), *[]string) {
+	names := &[]string{}
+	return func(name string) (string, bool) {
+		*names = append(*names, name)
+		value, ok := values[name]
+		return value, ok
+	}, names
+}
+
+// bothVariables returns an environment whose keys a client must not use when
+// keys are passed.
+func bothVariables() map[string]string {
+	return map[string]string{
+		"SCREENSHOTSCOUT_ACCESS_KEY": "ak_env",
+		"SCREENSHOTSCOUT_SECRET_KEY": "sk_env",
+	}
+}
+
+func configurationErrorMessage(t *testing.T, err error) string {
+	t.Helper()
+	if !errors.Is(err, ErrConfiguration) {
+		t.Fatalf("expected configuration category, got %v", err)
+	}
+	var configurationError *ConfigurationError
+	if !errors.As(err, &configurationError) {
+		t.Fatalf("expected ConfigurationError, got %T", err)
+	}
+	return configurationError.Message
+}
+
+func querySignature(t *testing.T, rawURL string) string {
+	t.Helper()
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse %s: %v", rawURL, err)
+	}
+	return parsed.Query().Get("signature")
+}
+
+// signedCaptureTarget and signedCaptureOptions, signed with ak_test and
+// sk_test, give signedCaptureSignature.
+const (
+	signedCaptureTarget    = "https://example.com/a b?x=1&y=2"
+	signedCaptureSignature = "6419f2ac8c0440f1e341b547630606c9dc74dacfbb2df8e122fc9ae26831d893"
+)
+
+func signedCaptureOptions() *CaptureOptions {
+	return &CaptureOptions{
+		ResponseType: pointer(CaptureResponseTypeJSON),
+		FullPage:     pointer(false),
+		Delay:        pointer(0),
+		Headers:      []string{"X-Test:one", "X-Test:two"},
+	}
+}
+
+func jsonResponse() *http.Response {
+	return response(http.StatusOK, "200 OK", "application/json", []byte("{}"), nil)
+}
+
 func TestNewClientValidatesConfiguration(t *testing.T) {
 	t.Parallel()
 
+	const (
+		missingAccessKey = "A non-blank Screenshot Scout access key is required."
+		invalidAccessKey = "The Screenshot Scout access key is not a valid Bearer credential."
+		invalidSecretKey = "The Screenshot Scout secret key must be a non-blank UTF-8 string when provided."
+	)
 	tests := []struct {
-		name      string
-		accessKey string
-		options   *ClientOptions
+		name    string
+		options []Option
+		message string
 	}{
-		{name: "blank access key", accessKey: "   "},
-		{name: "invalid bearer credential", accessKey: "key with spaces"},
-		{name: "blank secret key", accessKey: "key", options: &ClientOptions{SecretKey: "   "}},
+		{name: "nil option", options: []Option{nil}, message: "NewClient options must not be nil."},
+		{name: "empty access key", options: []Option{WithAccessKey("")}, message: missingAccessKey},
+		{name: "blank access key", options: []Option{WithAccessKey("   ")}, message: missingAccessKey},
+		{name: "secret key without access key", options: []Option{WithSecretKey("sk_code")}, message: missingAccessKey},
+		{name: "invalid bearer credential", options: []Option{WithAccessKey("key with spaces")}, message: invalidAccessKey},
+		{name: "empty secret key", options: []Option{WithAccessKey("key"), WithSecretKey("")}, message: invalidSecretKey},
+		{name: "blank secret key", options: []Option{WithAccessKey("key"), WithSecretKey("   ")}, message: invalidSecretKey},
+		{name: "invalid UTF-8 secret key", options: []Option{WithAccessKey("key"), WithSecretKey("\xff")}, message: invalidSecretKey},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			client, err := NewClient(test.accessKey, test.options)
+			lookupEnv, names := fakeEnvironment(bothVariables())
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv)}, test.options...)...)
 			if client != nil {
 				t.Fatal("expected no client")
 			}
-			if !errors.Is(err, ErrConfiguration) {
-				t.Fatalf("expected configuration category, got %v", err)
+			if message := configurationErrorMessage(t, err); message != test.message {
+				t.Fatalf("message = %q, want %q", message, test.message)
 			}
-			var configurationError *ConfigurationError
-			if !errors.As(err, &configurationError) {
-				t.Fatalf("expected ConfigurationError, got %T", err)
+			if len(*names) != 0 {
+				t.Fatalf("read environment variables %q", *names)
 			}
 		})
 	}
 
-	client, err := NewClient("key", nil)
+	client, err := NewClient(WithAccessKey("key"))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -116,13 +189,192 @@ func TestNewClientValidatesConfiguration(t *testing.T) {
 	}
 }
 
+func TestNewClientReadsKeysFromTheEnvironment(t *testing.T) {
+	t.Parallel()
+
+	const missingVariable = "A non-blank Screenshot Scout access key is required. Pass one, or set SCREENSHOTSCOUT_ACCESS_KEY."
+	tests := []struct {
+		name          string
+		values        map[string]string
+		wantAccessKey string
+		wantSecretKey string
+		wantMessage   string
+	}{
+		{
+			name:          "both variables",
+			values:        map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "ak_env", "SCREENSHOTSCOUT_SECRET_KEY": "sk_env"},
+			wantAccessKey: "ak_env",
+			wantSecretKey: "sk_env",
+		},
+		{
+			name:          "access key variable only",
+			values:        map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "ak_env"},
+			wantAccessKey: "ak_env",
+		},
+		{
+			name:          "empty secret key variable",
+			values:        map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "ak_env", "SCREENSHOTSCOUT_SECRET_KEY": ""},
+			wantAccessKey: "ak_env",
+		},
+		{
+			name:        "no variables",
+			values:      map[string]string{},
+			wantMessage: missingVariable,
+		},
+		{
+			name:        "empty access key variable",
+			values:      map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": ""},
+			wantMessage: missingVariable,
+		},
+		{
+			name:        "secret key variable only",
+			values:      map[string]string{"SCREENSHOTSCOUT_SECRET_KEY": "sk_env"},
+			wantMessage: missingVariable,
+		},
+		{
+			name:        "blank access key variable",
+			values:      map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "  "},
+			wantMessage: "SCREENSHOTSCOUT_ACCESS_KEY is set but blank.",
+		},
+		{
+			name:        "blank secret key variable",
+			values:      map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "ak_env", "SCREENSHOTSCOUT_SECRET_KEY": " \t"},
+			wantMessage: "SCREENSHOTSCOUT_SECRET_KEY is set but blank.",
+		},
+		{
+			name:        "invalid access key variable",
+			values:      map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "key with spaces"},
+			wantMessage: "The Screenshot Scout access key is not a valid Bearer credential.",
+		},
+		{
+			name:        "invalid UTF-8 secret key variable",
+			values:      map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "ak_env", "SCREENSHOTSCOUT_SECRET_KEY": "\xff"},
+			wantMessage: "The Screenshot Scout secret key must be a non-blank UTF-8 string when provided.",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupEnv, names := fakeEnvironment(test.values)
+			client, err := NewClient(withLookupEnv(lookupEnv))
+			if test.wantMessage != "" {
+				if client != nil {
+					t.Fatal("expected no client")
+				}
+				if message := configurationErrorMessage(t, err); message != test.wantMessage {
+					t.Fatalf("message = %q, want %q", message, test.wantMessage)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			if client.accessKey != test.wantAccessKey || client.secretKey != test.wantSecretKey {
+				t.Fatalf("keys = %q, %q; want %q, %q", client.accessKey, client.secretKey, test.wantAccessKey, test.wantSecretKey)
+			}
+			if client.secretKeyFromEnvironment != (test.wantSecretKey != "") {
+				t.Fatalf("secretKeyFromEnvironment = %t", client.secretKeyFromEnvironment)
+			}
+			if want := []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY"}; !slices.Equal(*names, want) {
+				t.Fatalf("read %q, want %q", *names, want)
+			}
+		})
+	}
+}
+
+// Setting variables affects the whole process, so this test doesn't run in
+// parallel.
+func TestNewClientReadsTheProcessEnvironmentByDefault(t *testing.T) {
+	t.Setenv("SCREENSHOTSCOUT_ACCESS_KEY", "ak_process")
+	t.Setenv("SCREENSHOTSCOUT_SECRET_KEY", "sk_process")
+
+	client, err := NewClient()
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if client.accessKey != "ak_process" || client.secretKey != "sk_process" || !client.secretKeyFromEnvironment {
+		t.Fatalf("unexpected keys: %q, %q (from environment: %t)", client.accessKey, client.secretKey, client.secretKeyFromEnvironment)
+	}
+}
+
+func TestPassingEitherKeyMeansTheEnvironmentIsNotRead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		keys       []Option
+		wantMethod string
+	}{
+		{name: "access key", keys: []Option{WithAccessKey("ak_code")}, wantMethod: http.MethodPost},
+		{name: "both keys", keys: []Option{WithAccessKey("ak_code"), WithSecretKey("sk_code")}, wantMethod: http.MethodGet},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupEnv, names := fakeEnvironment(bothVariables())
+			httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
+			})
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv), WithHTTPClient(httpClient)}, test.keys...)...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			if _, err := client.Capture(context.Background(), "https://example.com", nil); err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			recorded := (*requests)[0]
+			if recorded.method != test.wantMethod {
+				t.Fatalf("method = %s, want %s", recorded.method, test.wantMethod)
+			}
+			if recorded.header.Get("Authorization") != "Bearer ak_code" {
+				t.Fatalf("unexpected authorization: %s", recorded.header.Get("Authorization"))
+			}
+			if client.secretKeyFromEnvironment {
+				t.Fatal("a passed secret key was reported as coming from the environment")
+			}
+			if len(*names) != 0 {
+				t.Fatalf("read environment variables %q", *names)
+			}
+		})
+	}
+}
+
+func TestFormattingAClientHidesItsKeys(t *testing.T) {
+	t.Parallel()
+
+	signing, err := NewClient(WithAccessKey("ak_hidden"), WithSecretKey("sk_hidden"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	unsigned, err := NewClient(WithAccessKey("ak_hidden"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		for _, value := range []any{signing, *signing, unsigned, *unsigned} {
+			formatted := fmt.Sprintf(verb, value)
+			if strings.Contains(formatted, "ak_hidden") || strings.Contains(formatted, "sk_hidden") {
+				t.Errorf("%s of %T revealed a key: %s", verb, value, formatted)
+			}
+		}
+	}
+	if got, want := fmt.Sprint(signing), `screenshotscout.Client{accessKey:"[redacted]", secretKey:"[redacted]"}`; got != want {
+		t.Errorf("signing client = %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprint(unsigned), `screenshotscout.Client{accessKey:"[redacted]", secretKey:""}`; got != want {
+		t.Errorf("unsigned client = %s, want %s", got, want)
+	}
+}
+
 func TestCapturePOSTSerializesCompleteOptionSurface(t *testing.T) {
 	t.Parallel()
 
 	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
 	})
-	client, err := NewClient("access-key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("access-key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -290,7 +542,7 @@ func TestOmittedOptionsDoNotInsertServiceDefaults(t *testing.T) {
 	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
 	})
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -321,7 +573,7 @@ func TestGETAndCaptureURLPreserveOrderAndUseRFC3986Encoding(t *testing.T) {
 	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
 	})
-	client, err := NewClient("query-key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("query-key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -377,29 +629,17 @@ func TestGETAndCaptureURLPreserveOrderAndUseRFC3986Encoding(t *testing.T) {
 func TestSigningMatchesCurrentAPIAlgorithm(t *testing.T) {
 	t.Parallel()
 
-	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
-		return response(http.StatusOK, "200 OK", "application/json", []byte("{}"), nil)
-	})
-	client, err := NewClient("ak_test", &ClientOptions{SecretKey: "sk_test", HTTPClient: httpClient})
+	httpClient, requests := recordingHTTPClient(t, jsonResponse)
+	client, err := NewClient(WithAccessKey("ak_test"), WithSecretKey("sk_test"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	responseType := CaptureResponseTypeJSON
-	falseValue := false
-	zero := 0
-	options := &CaptureOptions{
-		ResponseType: &responseType,
-		FullPage:     &falseValue,
-		Delay:        &zero,
-		Headers:      []string{"X-Test:one", "X-Test:two"},
-	}
-	target := "https://example.com/a b?x=1&y=2"
-	const expectedSignature = "6419f2ac8c0440f1e341b547630606c9dc74dacfbb2df8e122fc9ae26831d893"
+	options := signedCaptureOptions()
 
-	if _, err := client.Capture(context.Background(), target, options, CaptureHTTPMethodGET); err != nil {
+	if _, err := client.Capture(context.Background(), signedCaptureTarget, options, CaptureHTTPMethodGET); err != nil {
 		t.Fatalf("signed GET: %v", err)
 	}
-	built, err := client.BuildCaptureURL(target, options)
+	built, err := client.BuildCaptureURL(signedCaptureTarget, options)
 	if err != nil {
 		t.Fatalf("signed capture URL: %v", err)
 	}
@@ -408,14 +648,14 @@ func TestSigningMatchesCurrentAPIAlgorithm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse recorded GET: %v", err)
 	}
-	if getURL.URL.Query().Get("signature") != expectedSignature {
+	if getURL.URL.Query().Get("signature") != signedCaptureSignature {
 		t.Fatalf("unexpected GET signature: %s", getURL.URL.Query().Get("signature"))
 	}
 	builtRequest, err := http.NewRequest(http.MethodGet, built, nil)
 	if err != nil {
 		t.Fatalf("parse built URL: %v", err)
 	}
-	if builtRequest.URL.Query().Get("signature") != expectedSignature {
+	if builtRequest.URL.Query().Get("signature") != signedCaptureSignature {
 		t.Fatalf("unexpected built URL signature: %s", builtRequest.URL.Query().Get("signature"))
 	}
 	if builtRequest.URL.Query().Get("access_key") != "ak_test" {
@@ -429,44 +669,112 @@ func TestSigningMatchesCurrentAPIAlgorithm(t *testing.T) {
 	}
 }
 
-func TestPOSTWithSecretKeyFailsBeforeTransport(t *testing.T) {
+func TestOmittedMethodWithSecretKeySendsSignedGET(t *testing.T) {
 	t.Parallel()
 
-	var calls atomic.Int32
-	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		calls.Add(1)
-		return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil), nil
-	})}
-	client, err := NewClient("ak_test", &ClientOptions{SecretKey: "sk_test", HTTPClient: httpClient})
+	httpClient, requests := recordingHTTPClient(t, jsonResponse)
+	client, err := NewClient(WithAccessKey("ak_test"), WithSecretKey("sk_test"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	const expectedMessage = "POST requests can't be signed. This client has a secret key: send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests."
+	if _, err := client.Capture(context.Background(), signedCaptureTarget, signedCaptureOptions()); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if len(*requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(*requests))
+	}
+	recorded := (*requests)[0]
+	if recorded.method != http.MethodGet {
+		t.Fatalf("expected GET, got %s", recorded.method)
+	}
+	if len(recorded.body) != 0 {
+		t.Fatalf("GET request unexpectedly had a body: %q", recorded.body)
+	}
+	if signature := querySignature(t, recorded.url); signature != signedCaptureSignature {
+		t.Fatalf("unexpected GET signature: %s", signature)
+	}
+}
+
+func TestEnvironmentKeysAreReadOnceAndSignAnOmittedMethod(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]string{
+		"SCREENSHOTSCOUT_ACCESS_KEY": "ak_test",
+		"SCREENSHOTSCOUT_SECRET_KEY": "sk_test",
+	}
+	lookupEnv, names := fakeEnvironment(values)
+	httpClient, requests := recordingHTTPClient(t, jsonResponse)
+	client, err := NewClient(withLookupEnv(lookupEnv), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	values["SCREENSHOTSCOUT_ACCESS_KEY"] = "changed"
+	values["SCREENSHOTSCOUT_SECRET_KEY"] = "changed"
+
+	if _, err := client.Capture(context.Background(), signedCaptureTarget, signedCaptureOptions()); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	recorded := (*requests)[0]
+	if recorded.method != http.MethodGet {
+		t.Fatalf("expected GET, got %s", recorded.method)
+	}
+	if recorded.header.Get("Authorization") != "Bearer ak_test" {
+		t.Fatalf("unexpected authorization: %s", recorded.header.Get("Authorization"))
+	}
+	if signature := querySignature(t, recorded.url); signature != signedCaptureSignature {
+		t.Fatalf("unexpected GET signature: %s", signature)
+	}
+	if want := []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY"}; !slices.Equal(*names, want) {
+		t.Fatalf("read %q, want %q", *names, want)
+	}
+}
+
+func TestPOSTWithSecretKeyFailsBeforeTransport(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		name   string
-		method []CaptureHTTPMethod
+		name        string
+		keys        []Option
+		environment map[string]string
+		message     string
 	}{
-		{name: "omitted method"},
-		{name: "explicit POST", method: []CaptureHTTPMethod{CaptureHTTPMethodPOST}},
+		{
+			name:    "secret key passed",
+			keys:    []Option{WithAccessKey("ak_test"), WithSecretKey("sk_test")},
+			message: "POST requests can't be signed. This client has a secret key: send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests.",
+		},
+		{
+			name: "secret key from the environment",
+			environment: map[string]string{
+				"SCREENSHOTSCOUT_ACCESS_KEY": "ak_test",
+				"SCREENSHOTSCOUT_SECRET_KEY": "sk_test",
+			},
+			message: "POST requests can't be signed. This client has a secret key from SCREENSHOTSCOUT_SECRET_KEY: send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests.",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := client.Capture(context.Background(), "https://example.com", nil, test.method...)
-			if !errors.Is(err, ErrConfiguration) {
-				t.Fatalf("expected configuration category, got %v", err)
+			t.Parallel()
+			var calls atomic.Int32
+			httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil), nil
+			})}
+			lookupEnv, _ := fakeEnvironment(test.environment)
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv), WithHTTPClient(httpClient)}, test.keys...)...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
 			}
-			var configurationError *ConfigurationError
-			if !errors.As(err, &configurationError) {
-				t.Fatalf("expected ConfigurationError, got %T", err)
+
+			_, err = client.Capture(context.Background(), "https://example.com", nil, CaptureHTTPMethodPOST)
+			if message := configurationErrorMessage(t, err); message != test.message {
+				t.Fatalf("message = %q, want %q", message, test.message)
 			}
-			if configurationError.Message != expectedMessage {
-				t.Fatalf("unexpected message: %s", configurationError.Message)
+			if calls.Load() != 0 {
+				t.Fatalf("POST with a secret key reached transport %d times", calls.Load())
 			}
 		})
-	}
-	if calls.Load() != 0 {
-		t.Fatalf("POST with a secret key reached transport %d times", calls.Load())
 	}
 }
 
@@ -482,7 +790,7 @@ func TestBinaryResponseRetainsBytesMetadataAndRawResponse(t *testing.T) {
 	httpClient, _ := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusCreated, "201 Created", "image/png", []byte{0, 1, 2, 255}, headers)
 	})
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -524,7 +832,7 @@ func TestJSONResponseRetainsKnownAndAdditionalFields(t *testing.T) {
 	httpClient, _ := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusOK, "200 OK", "application/vnd.screenshotscout+json; charset=utf-8", body, nil)
 	})
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -577,7 +885,7 @@ func TestKnownResponseTypesRejectMismatchedSuccessfulMediaTypes(t *testing.T) {
 			httpClient, _ := recordingHTTPClient(t, func() *http.Response {
 				return response(http.StatusOK, "200 OK", test.contentType, test.body, nil)
 			})
-			client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+			client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 			if err != nil {
 				t.Fatalf("NewClient: %v", err)
 			}
@@ -602,7 +910,7 @@ func TestDynamicResponseTypeUsesActualMediaType(t *testing.T) {
 	httpClient, _ := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusOK, "200 OK", "application/json", []byte(`{"screenshot_url":"https://cdn.example/a.png"}`), nil)
 	})
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -627,7 +935,7 @@ func TestMalformedSuccessfulJSONIsResponseDecodingError(t *testing.T) {
 			httpClient, _ := recordingHTTPClient(t, func() *http.Response {
 				return response(http.StatusOK, "200 OK", "application/json", []byte(body), nil)
 			})
-			client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+			client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 			if err != nil {
 				t.Fatalf("NewClient: %v", err)
 			}
@@ -652,7 +960,7 @@ func TestAPIFailureRetainsParsedFieldsAndRawResponse(t *testing.T) {
 	httpClient, _ := recordingHTTPClient(t, func() *http.Response {
 		return response(http.StatusBadRequest, "400 Bad Request", "application/json; charset=utf-8", body, headers)
 	})
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -705,7 +1013,7 @@ func TestDefaultClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewClient("key", nil)
+	client, err := NewClient(WithAccessKey("key"))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -746,7 +1054,7 @@ func TestInjectedHTTPClientDoesNotFollowRedirectsOrMutateCallerPolicy(t *testing
 			return nil
 		},
 	}
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -790,7 +1098,7 @@ func TestTransportFailureRetainsNativeCauseAndIsNotRetried(t *testing.T) {
 		calls.Add(1)
 		return nil, nativeCause
 	})}
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -817,7 +1125,7 @@ func TestContextCancellationAndDeadlineAreNotWrapped(t *testing.T) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
 	})}
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -851,7 +1159,7 @@ func TestUnsafeValuesAndInvalidMethodsFailBeforeTransport(t *testing.T) {
 		calls.Add(1)
 		return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil), nil
 	})}
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -901,7 +1209,7 @@ func TestResponseBodyReadFailureIsTransportError(t *testing.T) {
 			Body:       &failingReadCloser{cause: nativeCause},
 		}, nil
 	})}
-	client, err := NewClient("key", &ClientOptions{HTTPClient: httpClient})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

@@ -9,11 +9,7 @@ import (
 )
 
 func main() {
-	accessKey := os.Getenv("SCREENSHOTSCOUT_ACCESS_KEY")
-	if accessKey == "" {
-		log.Fatal("set SCREENSHOTSCOUT_ACCESS_KEY first")
-	}
-	client, err := screenshotscout.NewClient(accessKey, nil)
+	client, err := screenshotscout.NewClient() // Reads SCREENSHOTSCOUT_ACCESS_KEY
 	if err != nil {
 		log.Fatal(err)
 	}

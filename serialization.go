@@ -281,14 +281,16 @@ func (serializer *captureSerializer) appendBool(_ string, wireName string, value
 	serializer.body[wireName] = *value
 }
 
-func resolveCaptureHTTPMethod(methods []CaptureHTTPMethod) (CaptureHTTPMethod, error) {
+// resolveCaptureHTTPMethod returns the method the caller passed, or
+// defaultMethod when the caller passed none.
+func resolveCaptureHTTPMethod(methods []CaptureHTTPMethod, defaultMethod CaptureHTTPMethod) (CaptureHTTPMethod, error) {
 	if len(methods) > 1 {
 		return "", &SerializationError{
 			Message: "Capture accepts at most one HTTP method selector.",
 			Option:  "method",
 		}
 	}
-	method := CaptureHTTPMethodPOST
+	method := defaultMethod
 	if len(methods) == 1 {
 		method = methods[0]
 	}

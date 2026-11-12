@@ -3,19 +3,13 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
 
 	screenshotscout "github.com/screenshotscout/screenshotscout-go"
 )
 
 func main() {
-	accessKey := os.Getenv("SCREENSHOTSCOUT_ACCESS_KEY")
-	if accessKey == "" {
-		log.Fatal("set SCREENSHOTSCOUT_ACCESS_KEY first")
-	}
-	client, err := screenshotscout.NewClient(accessKey, &screenshotscout.ClientOptions{
-		SecretKey: os.Getenv("SCREENSHOTSCOUT_SECRET_KEY"),
-	})
+	// Reads SCREENSHOTSCOUT_ACCESS_KEY, and SCREENSHOTSCOUT_SECRET_KEY if it's set
+	client, err := screenshotscout.NewClient()
 	if err != nil {
 		log.Fatal(err)
 	}
