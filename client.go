@@ -14,7 +14,10 @@ import (
 	"unicode/utf8"
 )
 
-const captureEndpointURL = "https://api.screenshotscout.com/v1/capture"
+const (
+	defaultBaseURL = "https://api.screenshotscout.com"
+	capturePath    = "/v1/capture"
+)
 
 var accessKeyPattern = regexp.MustCompile(`^[A-Za-z0-9\-._~+/]+=*$`)
 
@@ -23,6 +26,7 @@ type Client struct {
 	accessKey                string
 	secretKey                string
 	secretKeyFromEnvironment bool
+	baseURLFromEnvironment   bool
 	endpoint                 string
 	httpClient               *http.Client
 }
@@ -30,8 +34,9 @@ type Client struct {
 // NewClient creates a reusable client. Without WithAccessKey or WithSecretKey,
 // it reads SCREENSHOTSCOUT_ACCESS_KEY and, if it's set,
 // SCREENSHOTSCOUT_SECRET_KEY. Passing either key means neither variable is
-// read. The access key is sent in the Authorization header for Capture calls,
-// and a secret key signs capture requests and capture URLs.
+// read. Without WithBaseURL, it reads SCREENSHOTSCOUT_BASE_URL. The access key
+// is sent in the Authorization header for Capture calls, and a secret key
+// signs capture requests and capture URLs.
 func NewClient(options ...Option) (*Client, error) {
 	configuration := clientOptions{lookupEnv: os.LookupEnv}
 	for _, option := range options {
@@ -69,6 +74,12 @@ func NewClient(options ...Option) (*Client, error) {
 			}
 		}
 	}
+
+	endpoint, err := resolveCaptureEndpoint(configuration.baseURL, configuration.lookupEnv)
+	if err != nil {
+		return nil, err
+	}
+
 	httpClient := &http.Client{}
 	if configuration.httpClient != nil {
 		clonedHTTPClient := *configuration.httpClient
@@ -82,7 +93,8 @@ func NewClient(options ...Option) (*Client, error) {
 		accessKey:                accessKey,
 		secretKey:                secretKey,
 		secretKeyFromEnvironment: credentials.fromEnvironment && secretKey != "",
-		endpoint:                 captureEndpointURL,
+		baseURLFromEnvironment:   endpoint.fromEnvironment,
+		endpoint:                 endpoint.url,
 		httpClient:               httpClient,
 	}, nil
 }
@@ -170,7 +182,7 @@ func (client *Client) Capture(
 	request, err := http.NewRequestWithContext(ctx, string(captureMethod), requestURL, body)
 	if err != nil {
 		return nil, &SerializationError{
-			Message: "The Screenshot Scout HTTP request could not be constructed.",
+			Message: "The Screenshot Scout HTTP request could not be constructed." + client.baseURLSource(),
 			Cause:   err,
 		}
 	}
@@ -185,7 +197,7 @@ func (client *Client) Capture(
 			return nil, contextErr
 		}
 		return nil, &TransportError{
-			Message: "Screenshot Scout request failed before an HTTP response body was received.",
+			Message: "Screenshot Scout request failed before an HTTP response body was received." + client.baseURLSource(),
 			Cause:   err,
 		}
 	}
@@ -197,7 +209,7 @@ func (client *Client) Capture(
 			return nil, contextErr
 		}
 		return nil, &TransportError{
-			Message: "Screenshot Scout request failed before a complete HTTP response body was received.",
+			Message: "Screenshot Scout request failed before a complete HTTP response body was received." + client.baseURLSource(),
 			Cause:   err,
 		}
 	}
@@ -243,4 +255,13 @@ func (client *Client) createSignature(pairs []wirePair) string {
 	mac := hmac.New(sha256.New, []byte(client.secretKey))
 	_, _ = mac.Write([]byte(canonicalQuery))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// baseURLSource returns a sentence naming SCREENSHOTSCOUT_BASE_URL when the
+// base URL came from it, for the errors a wrong base URL can cause.
+func (client *Client) baseURLSource() string {
+	if !client.baseURLFromEnvironment {
+		return ""
+	}
+	return " The base URL comes from " + baseURLVariable + "."
 }

@@ -151,6 +151,21 @@ if err != nil {
 
 If you pass either key, the client reads neither environment variable. A blank key, such as `WithSecretKey("")`, is an error, so leave out `WithSecretKey` when you have no secret key.
 
+## Send requests to another server
+
+To send requests to another server, such as your own proxy or a mock server, pass its base URL, or set it as the `SCREENSHOTSCOUT_BASE_URL` environment variable:
+
+```go
+client, err := screenshotscout.NewClient(
+	screenshotscout.WithBaseURL("https://proxy.example.com"),
+) // Reads SCREENSHOTSCOUT_ACCESS_KEY
+if err != nil {
+	log.Fatal(err)
+}
+```
+
+The client sends captures to the base URL plus `/v1/capture`, and `BuildCaptureURL` builds URLs on it. A base URL you pass wins over the variable.
+
 ## Capture options
 
 The target URL is the required second argument to `Capture` and the first argument to `BuildCaptureURL`. `CaptureOptions` provides the supported screenshot options:

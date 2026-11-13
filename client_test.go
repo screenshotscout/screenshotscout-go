@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -18,6 +20,16 @@ import (
 	"testing"
 	"time"
 )
+
+// Tests that don't pass withLookupEnv read the process environment, so a base
+// URL set in the developer's own environment must not reach them.
+func TestMain(m *testing.M) {
+	if err := os.Unsetenv("SCREENSHOTSCOUT_BASE_URL"); err != nil {
+		fmt.Fprintln(os.Stderr, "unset SCREENSHOTSCOUT_BASE_URL:", err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -116,6 +128,10 @@ func querySignature(t *testing.T, rawURL string) string {
 	return parsed.Query().Get("signature")
 }
 
+// defaultCaptureEndpointURL is where a client sends captures when no base URL
+// is passed or set.
+const defaultCaptureEndpointURL = defaultBaseURL + capturePath
+
 // signedCaptureTarget and signedCaptureOptions, signed with ak_test and
 // sk_test, give signedCaptureSignature.
 const (
@@ -184,7 +200,7 @@ func TestNewClientValidatesConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCaptureURL: %v", err)
 	}
-	if !strings.HasPrefix(built, captureEndpointURL+"?") {
+	if !strings.HasPrefix(built, defaultCaptureEndpointURL+"?") {
 		t.Fatalf("unexpected capture endpoint: %s", built)
 	}
 }
@@ -276,7 +292,7 @@ func TestNewClientReadsKeysFromTheEnvironment(t *testing.T) {
 			if client.secretKeyFromEnvironment != (test.wantSecretKey != "") {
 				t.Fatalf("secretKeyFromEnvironment = %t", client.secretKeyFromEnvironment)
 			}
-			if want := []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY"}; !slices.Equal(*names, want) {
+			if want := []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY", "SCREENSHOTSCOUT_BASE_URL"}; !slices.Equal(*names, want) {
 				t.Fatalf("read %q, want %q", *names, want)
 			}
 		})
@@ -298,7 +314,21 @@ func TestNewClientReadsTheProcessEnvironmentByDefault(t *testing.T) {
 	}
 }
 
-func TestPassingEitherKeyMeansTheEnvironmentIsNotRead(t *testing.T) {
+// Setting variables affects the whole process, so this test doesn't run in
+// parallel.
+func TestNewClientReadsTheBaseURLFromTheProcessEnvironmentByDefault(t *testing.T) {
+	t.Setenv("SCREENSHOTSCOUT_BASE_URL", "http://localhost:8787/")
+
+	client, err := NewClient(WithAccessKey("ak_code"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if client.endpoint != "http://localhost:8787/v1/capture" || !client.baseURLFromEnvironment {
+		t.Fatalf("unexpected endpoint: %s (from environment: %t)", client.endpoint, client.baseURLFromEnvironment)
+	}
+}
+
+func TestPassingEitherKeyMeansTheKeyVariablesAreNotRead(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -333,8 +363,8 @@ func TestPassingEitherKeyMeansTheEnvironmentIsNotRead(t *testing.T) {
 			if client.secretKeyFromEnvironment {
 				t.Fatal("a passed secret key was reported as coming from the environment")
 			}
-			if len(*names) != 0 {
-				t.Fatalf("read environment variables %q", *names)
+			if want := []string{"SCREENSHOTSCOUT_BASE_URL"}; !slices.Equal(*names, want) {
+				t.Fatalf("read %q, want %q", *names, want)
 			}
 		})
 	}
@@ -478,7 +508,7 @@ func TestCapturePOSTSerializesCompleteOptionSurface(t *testing.T) {
 	if recorded.method != http.MethodPost {
 		t.Fatalf("expected POST, got %s", recorded.method)
 	}
-	if recorded.url != captureEndpointURL {
+	if recorded.url != defaultCaptureEndpointURL {
 		t.Fatalf("unexpected URL: %s", recorded.url)
 	}
 	if recorded.header.Get("Authorization") != "Bearer access-key" {
@@ -725,7 +755,7 @@ func TestEnvironmentKeysAreReadOnceAndSignAnOmittedMethod(t *testing.T) {
 	if signature := querySignature(t, recorded.url); signature != signedCaptureSignature {
 		t.Fatalf("unexpected GET signature: %s", signature)
 	}
-	if want := []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY"}; !slices.Equal(*names, want) {
+	if want := []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY", "SCREENSHOTSCOUT_BASE_URL"}; !slices.Equal(*names, want) {
 		t.Fatalf("read %q, want %q", *names, want)
 	}
 }
@@ -1013,11 +1043,10 @@ func TestDefaultClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewClient(WithAccessKey("key"))
+	client, err := NewClient(WithAccessKey("key"), WithBaseURL(server.URL))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	client.endpoint = server.URL + "/v1/capture"
 	_, err = client.Capture(context.Background(), "https://example.com", nil)
 	var apiError *APIError
 	if !errors.As(err, &apiError) || apiError.StatusCode != http.StatusFound {
@@ -1054,11 +1083,10 @@ func TestInjectedHTTPClientDoesNotFollowRedirectsOrMutateCallerPolicy(t *testing
 			return nil
 		},
 	}
-	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient), WithBaseURL(server.URL))
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	client.endpoint = server.URL + "/v1/capture"
 
 	_, err = client.Capture(context.Background(), "https://example.com", nil)
 	var apiError *APIError
@@ -1216,5 +1244,487 @@ func TestResponseBodyReadFailureIsTransportError(t *testing.T) {
 	_, err = client.Capture(context.Background(), "https://example.com", nil)
 	if !errors.Is(err, ErrTransport) || !errors.Is(err, nativeCause) {
 		t.Fatalf("expected transport error retaining native cause, got %v", err)
+	}
+}
+
+func TestBaseURLIsUsedForCapturesAndBuiltURLs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		baseURL  string
+		endpoint string
+	}{
+		{name: "host", baseURL: "http://localhost:8787", endpoint: "http://localhost:8787/v1/capture"},
+		{name: "trailing slash", baseURL: "http://localhost:8787/", endpoint: "http://localhost:8787/v1/capture"},
+		{name: "path prefix", baseURL: "https://proxy.example.com/screenshotscout/", endpoint: "https://proxy.example.com/screenshotscout/v1/capture"},
+		{name: "several trailing slashes", baseURL: "https://proxy.example.com/screenshotscout//", endpoint: "https://proxy.example.com/screenshotscout/v1/capture"},
+		{name: "escaped path", baseURL: "https://proxy.example.com/a%20b", endpoint: "https://proxy.example.com/a%20b/v1/capture"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupEnv, names := fakeEnvironment(map[string]string{"SCREENSHOTSCOUT_BASE_URL": "http://env.example"})
+			httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
+			})
+			client, err := NewClient(withLookupEnv(lookupEnv), WithAccessKey("key"), WithBaseURL(test.baseURL), WithHTTPClient(httpClient))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			if _, err := client.Capture(context.Background(), "https://example.com", nil); err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			if _, err := client.Capture(context.Background(), "https://example.com", nil, CaptureHTTPMethodGET); err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			built, err := client.BuildCaptureURL("https://example.com", nil)
+			if err != nil {
+				t.Fatalf("BuildCaptureURL: %v", err)
+			}
+
+			if len(*requests) != 2 {
+				t.Fatalf("expected two requests, got %d", len(*requests))
+			}
+			if post := (*requests)[0]; post.method != http.MethodPost || post.url != test.endpoint {
+				t.Errorf("POST went to %s %s", post.method, post.url)
+			}
+			if get := (*requests)[1]; get.method != http.MethodGet || get.url != test.endpoint+"?url=https%3A%2F%2Fexample.com" {
+				t.Errorf("GET went to %s %s", get.method, get.url)
+			}
+			if want := test.endpoint + "?access_key=key&url=https%3A%2F%2Fexample.com"; built != want {
+				t.Errorf("built URL = %s, want %s", built, want)
+			}
+			if client.baseURLFromEnvironment {
+				t.Error("a passed base URL was reported as coming from the environment")
+			}
+			if len(*names) != 0 {
+				t.Errorf("read environment variables %q", *names)
+			}
+		})
+	}
+}
+
+func TestBaseURLLeavesSigningUnchanged(t *testing.T) {
+	t.Parallel()
+
+	const endpoint = "https://proxy.example.com/screenshotscout/v1/capture"
+	httpClient, requests := recordingHTTPClient(t, jsonResponse)
+	client, err := NewClient(
+		WithAccessKey("ak_test"),
+		WithSecretKey("sk_test"),
+		WithBaseURL("https://proxy.example.com/screenshotscout/"),
+		WithHTTPClient(httpClient),
+	)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	options := signedCaptureOptions()
+
+	if _, err := client.Capture(context.Background(), signedCaptureTarget, options, CaptureHTTPMethodGET); err != nil {
+		t.Fatalf("signed GET: %v", err)
+	}
+	built, err := client.BuildCaptureURL(signedCaptureTarget, options)
+	if err != nil {
+		t.Fatalf("signed capture URL: %v", err)
+	}
+
+	for _, captureURL := range []string{(*requests)[0].url, built} {
+		if !strings.HasPrefix(captureURL, endpoint+"?") {
+			t.Errorf("unexpected capture endpoint: %s", captureURL)
+		}
+		if signature := querySignature(t, captureURL); signature != signedCaptureSignature {
+			t.Errorf("unexpected signature: %s", signature)
+		}
+	}
+}
+
+func TestWithoutABaseURLCapturesGoToTheScreenshotScoutAPI(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		values  map[string]string
+		options []Option
+	}{
+		{name: "variable unset", values: map[string]string{}},
+		{name: "variable empty", values: map[string]string{"SCREENSHOTSCOUT_BASE_URL": ""}},
+		{name: "empty base URL passed", values: map[string]string{}, options: []Option{WithBaseURL("")}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupEnv, names := fakeEnvironment(test.values)
+			httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
+			})
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv), WithAccessKey("key"), WithHTTPClient(httpClient)}, test.options...)...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			if _, err := client.Capture(context.Background(), "https://example.com", nil); err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			built, err := client.BuildCaptureURL("https://example.com", nil)
+			if err != nil {
+				t.Fatalf("BuildCaptureURL: %v", err)
+			}
+
+			if (*requests)[0].url != defaultCaptureEndpointURL {
+				t.Errorf("POST went to %s", (*requests)[0].url)
+			}
+			if want := defaultCaptureEndpointURL + "?access_key=key&url=https%3A%2F%2Fexample.com"; built != want {
+				t.Errorf("built URL = %s, want %s", built, want)
+			}
+			if client.baseURLFromEnvironment {
+				t.Error("the default base URL was reported as coming from the environment")
+			}
+			if want := []string{"SCREENSHOTSCOUT_BASE_URL"}; !slices.Equal(*names, want) {
+				t.Errorf("read %q, want %q", *names, want)
+			}
+		})
+	}
+}
+
+func TestBaseURLVariableIsReadOnceWhenNoBaseURLIsPassed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		values    map[string]string
+		options   []Option
+		wantNames []string
+	}{
+		{
+			name:      "keys passed",
+			options:   []Option{WithAccessKey("ak_test")},
+			wantNames: []string{"SCREENSHOTSCOUT_BASE_URL"},
+		},
+		{
+			name:      "empty base URL passed",
+			options:   []Option{WithAccessKey("ak_test"), WithBaseURL("")},
+			wantNames: []string{"SCREENSHOTSCOUT_BASE_URL"},
+		},
+		{
+			name:      "keys from the environment",
+			values:    map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "ak_test"},
+			wantNames: []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY", "SCREENSHOTSCOUT_BASE_URL"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			values := map[string]string{"SCREENSHOTSCOUT_BASE_URL": "http://localhost:8787/"}
+			maps.Copy(values, test.values)
+			lookupEnv, names := fakeEnvironment(values)
+			httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
+			})
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv), WithHTTPClient(httpClient)}, test.options...)...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+			values["SCREENSHOTSCOUT_BASE_URL"] = "http://changed.example"
+
+			if _, err := client.Capture(context.Background(), "https://example.com", nil); err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			built, err := client.BuildCaptureURL("https://example.com", nil)
+			if err != nil {
+				t.Fatalf("BuildCaptureURL: %v", err)
+			}
+
+			if (*requests)[0].url != "http://localhost:8787/v1/capture" {
+				t.Errorf("POST went to %s", (*requests)[0].url)
+			}
+			if want := "http://localhost:8787/v1/capture?access_key=ak_test&url=https%3A%2F%2Fexample.com"; built != want {
+				t.Errorf("built URL = %s, want %s", built, want)
+			}
+			if !client.baseURLFromEnvironment {
+				t.Error("the base URL was not reported as coming from the environment")
+			}
+			if !slices.Equal(*names, test.wantNames) {
+				t.Errorf("read %q, want %q", *names, test.wantNames)
+			}
+		})
+	}
+}
+
+func TestPassedBaseURLWinsOverTheVariable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		values    map[string]string
+		keys      []Option
+		wantNames []string
+	}{
+		{
+			name:   "keys passed",
+			values: map[string]string{"SCREENSHOTSCOUT_BASE_URL": "http://localhost:8787"},
+			keys:   []Option{WithAccessKey("ak_test")},
+		},
+		{
+			name:   "blank variable",
+			values: map[string]string{"SCREENSHOTSCOUT_BASE_URL": " \t"},
+			keys:   []Option{WithAccessKey("ak_test")},
+		},
+		{
+			name: "keys from the environment",
+			values: map[string]string{
+				"SCREENSHOTSCOUT_ACCESS_KEY": "ak_test",
+				"SCREENSHOTSCOUT_BASE_URL":   "http://localhost:8787",
+			},
+			wantNames: []string{"SCREENSHOTSCOUT_ACCESS_KEY", "SCREENSHOTSCOUT_SECRET_KEY"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupEnv, names := fakeEnvironment(test.values)
+			httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
+			})
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv), WithBaseURL("https://proxy.example.com"), WithHTTPClient(httpClient)}, test.keys...)...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			if _, err := client.Capture(context.Background(), "https://example.com", nil); err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			if (*requests)[0].url != "https://proxy.example.com/v1/capture" {
+				t.Errorf("POST went to %s", (*requests)[0].url)
+			}
+			if client.baseURLFromEnvironment {
+				t.Error("a passed base URL was reported as coming from the environment")
+			}
+			if !slices.Equal(*names, test.wantNames) {
+				t.Errorf("read %q, want %q", *names, test.wantNames)
+			}
+		})
+	}
+}
+
+func TestBlankBaseURLVariableIsAnErrorAfterTheKeysAreValidated(t *testing.T) {
+	t.Parallel()
+
+	const blankVariable = "SCREENSHOTSCOUT_BASE_URL is set but blank."
+	tests := []struct {
+		name    string
+		values  map[string]string
+		keys    []Option
+		message string
+	}{
+		{
+			name:    "keys passed",
+			values:  map[string]string{"SCREENSHOTSCOUT_BASE_URL": " \t"},
+			keys:    []Option{WithAccessKey("key")},
+			message: blankVariable,
+		},
+		{
+			name:    "keys from the environment",
+			values:  map[string]string{"SCREENSHOTSCOUT_ACCESS_KEY": "ak_env", "SCREENSHOTSCOUT_BASE_URL": " \t"},
+			message: blankVariable,
+		},
+		{
+			name:    "invalid access key",
+			values:  map[string]string{"SCREENSHOTSCOUT_BASE_URL": " \t"},
+			keys:    []Option{WithAccessKey("key with spaces")},
+			message: "The Screenshot Scout access key is not a valid Bearer credential.",
+		},
+		{
+			name:    "missing access key variable",
+			values:  map[string]string{"SCREENSHOTSCOUT_BASE_URL": " \t"},
+			message: "A non-blank Screenshot Scout access key is required. Pass one, or set SCREENSHOTSCOUT_ACCESS_KEY.",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupEnv, _ := fakeEnvironment(test.values)
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv)}, test.keys...)...)
+			if client != nil {
+				t.Fatal("expected no client")
+			}
+			if message := configurationErrorMessage(t, err); message != test.message {
+				t.Fatalf("message = %q, want %q", message, test.message)
+			}
+		})
+	}
+}
+
+func TestTransportErrorsNameTheBaseURLVariableOnlyWhenTheBaseURLComesFromIt(t *testing.T) {
+	t.Parallel()
+
+	const (
+		requestFailed = "Screenshot Scout request failed before an HTTP response body was received."
+		bodyFailed    = "Screenshot Scout request failed before a complete HTTP response body was received."
+		fromVariable  = " The base URL comes from SCREENSHOTSCOUT_BASE_URL."
+	)
+	nativeCause := errors.New("connection refused")
+	failingRequest := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, nativeCause
+	})
+	failingBody := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       &failingReadCloser{cause: nativeCause},
+		}, nil
+	})
+	variable := map[string]string{"SCREENSHOTSCOUT_BASE_URL": "http://localhost:8787"}
+	passed := []Option{WithBaseURL("http://localhost:8787")}
+	tests := []struct {
+		name      string
+		values    map[string]string
+		baseURL   []Option
+		transport http.RoundTripper
+		message   string
+	}{
+		{name: "request, base URL from the variable", values: variable, transport: failingRequest, message: requestFailed + fromVariable},
+		{name: "request, base URL passed", values: variable, baseURL: passed, transport: failingRequest, message: requestFailed},
+		{name: "request, default base URL", transport: failingRequest, message: requestFailed},
+		{name: "body, base URL from the variable", values: variable, transport: failingBody, message: bodyFailed + fromVariable},
+		{name: "body, base URL passed", values: variable, baseURL: passed, transport: failingBody, message: bodyFailed},
+		{name: "body, default base URL", transport: failingBody, message: bodyFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			lookupEnv, _ := fakeEnvironment(test.values)
+			httpClient := &http.Client{Transport: test.transport}
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv), WithAccessKey("key"), WithHTTPClient(httpClient)}, test.baseURL...)...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			_, err = client.Capture(context.Background(), "https://example.com", nil)
+			var transportError *TransportError
+			if !errors.As(err, &transportError) || !errors.Is(err, ErrTransport) {
+				t.Fatalf("expected TransportError, got %v", err)
+			}
+			if transportError.Message != test.message {
+				t.Fatalf("message = %q, want %q", transportError.Message, test.message)
+			}
+			if !errors.Is(errors.Unwrap(err), nativeCause) {
+				t.Fatalf("native cause missing: %v", errors.Unwrap(err))
+			}
+		})
+	}
+}
+
+func TestContextErrorsAreNotWrappedWhenTheBaseURLComesFromTheVariable(t *testing.T) {
+	t.Parallel()
+
+	newClient := func(t *testing.T, transport roundTripFunc) *Client {
+		t.Helper()
+		lookupEnv, _ := fakeEnvironment(map[string]string{"SCREENSHOTSCOUT_BASE_URL": "http://localhost:8787"})
+		client, err := NewClient(withLookupEnv(lookupEnv), WithAccessKey("key"), WithHTTPClient(&http.Client{Transport: transport}))
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		if !client.baseURLFromEnvironment {
+			t.Fatal("the base URL did not come from the variable")
+		}
+		return client
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := newClient(t, func(request *http.Request) (*http.Response, error) {
+		cancel()
+		return nil, request.Context().Err()
+	})
+	if _, err := client.Capture(canceled, "https://example.com", nil); err != context.Canceled {
+		t.Fatalf("expected direct context.Canceled, got %v", err)
+	}
+
+	deadlineContext, deadlineCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer deadlineCancel()
+	client = newClient(t, func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	if _, err := client.Capture(deadlineContext, "https://example.com", nil); err != context.DeadlineExceeded {
+		t.Fatalf("expected direct context.DeadlineExceeded, got %v", err)
+	}
+
+	bodyContext, bodyCancel := context.WithCancel(context.Background())
+	defer bodyCancel()
+	client = newClient(t, func(*http.Request) (*http.Response, error) {
+		bodyCancel()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       &failingReadCloser{cause: errors.New("body stream failed")},
+		}, nil
+	})
+	if _, err := client.Capture(bodyContext, "https://example.com", nil); err != context.Canceled {
+		t.Fatalf("expected direct context.Canceled while reading the body, got %v", err)
+	}
+}
+
+func TestMalformedBaseURLFailsThroughTheExistingErrorPaths(t *testing.T) {
+	t.Parallel()
+
+	const (
+		constructionFailed = "The Screenshot Scout HTTP request could not be constructed."
+		requestFailed      = "Screenshot Scout request failed before an HTTP response body was received."
+		fromVariable       = " The base URL comes from SCREENSHOTSCOUT_BASE_URL."
+	)
+	tests := []struct {
+		name         string
+		baseURL      string
+		fromVariable bool
+		category     error
+		message      string
+	}{
+		{name: "control character passed", baseURL: "http://localhost:8787\n", category: ErrSerialization, message: constructionFailed},
+		{name: "control character from the variable", baseURL: "http://localhost:8787\n", fromVariable: true, category: ErrSerialization, message: constructionFailed + fromVariable},
+		{name: "not a URL passed", baseURL: "not a url", category: ErrTransport, message: requestFailed},
+		{name: "not a URL from the variable", baseURL: "not a url", fromVariable: true, category: ErrTransport, message: requestFailed + fromVariable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			values := map[string]string{}
+			options := []Option{WithAccessKey("key")}
+			if test.fromVariable {
+				values["SCREENSHOTSCOUT_BASE_URL"] = test.baseURL
+			} else {
+				options = append(options, WithBaseURL(test.baseURL))
+			}
+			lookupEnv, _ := fakeEnvironment(values)
+			// The default http.Client rejects both URLs without network I/O.
+			client, err := NewClient(append(options, withLookupEnv(lookupEnv))...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			built, err := client.BuildCaptureURL("https://example.com", nil)
+			if err != nil {
+				t.Fatalf("BuildCaptureURL: %v", err)
+			}
+			if want := test.baseURL + "/v1/capture?access_key=key&url=https%3A%2F%2Fexample.com"; built != want {
+				t.Errorf("built URL = %q, want %q", built, want)
+			}
+
+			_, err = client.Capture(context.Background(), "https://example.com", nil)
+			if !errors.Is(err, test.category) {
+				t.Fatalf("expected %v, got %v", test.category, err)
+			}
+			if err.Error() != test.message {
+				t.Fatalf("message = %q, want %q", err.Error(), test.message)
+			}
+			var urlError *url.Error
+			if !errors.As(errors.Unwrap(err), &urlError) {
+				t.Fatalf("expected a *url.Error cause, got %v", errors.Unwrap(err))
+			}
+		})
 	}
 }

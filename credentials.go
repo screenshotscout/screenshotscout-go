@@ -5,6 +5,7 @@ import "strings"
 const (
 	accessKeyVariable = "SCREENSHOTSCOUT_ACCESS_KEY"
 	secretKeyVariable = "SCREENSHOTSCOUT_SECRET_KEY"
+	baseURLVariable   = "SCREENSHOTSCOUT_BASE_URL"
 )
 
 // resolvedCredentials holds the keys to validate, from the options or from the
@@ -46,6 +47,43 @@ func resolveCredentials(
 		secretKey:       environmentSecretKey,
 		fromEnvironment: true,
 	}, nil
+}
+
+// resolvedCaptureEndpoint holds the URL that captures are sent to and capture
+// URLs are built on.
+type resolvedCaptureEndpoint struct {
+	url string
+	// fromEnvironment reports whether the base URL was read from the environment.
+	fromEnvironment bool
+}
+
+// resolveCaptureEndpoint picks the capture endpoint. A base URL passed as an
+// option wins. Without one, the variable is read, whether or not keys were
+// passed, and without that the production API is used. The base URL is used as
+// given: only trailing slashes are removed before the capture path is appended.
+func resolveCaptureEndpoint(
+	baseURL string,
+	lookupEnv func(string) (string, bool),
+) (resolvedCaptureEndpoint, error) {
+	if baseURL != "" {
+		return resolvedCaptureEndpoint{url: appendCapturePath(baseURL)}, nil
+	}
+
+	environmentBaseURL, err := readVariable(lookupEnv, baseURLVariable)
+	if err != nil {
+		return resolvedCaptureEndpoint{}, err
+	}
+	if environmentBaseURL != nil {
+		return resolvedCaptureEndpoint{
+			url:             appendCapturePath(*environmentBaseURL),
+			fromEnvironment: true,
+		}, nil
+	}
+	return resolvedCaptureEndpoint{url: appendCapturePath(defaultBaseURL)}, nil
+}
+
+func appendCapturePath(baseURL string) string {
+	return strings.TrimRight(baseURL, "/") + capturePath
 }
 
 // readVariable returns nil for an unset or empty variable, and an error for one

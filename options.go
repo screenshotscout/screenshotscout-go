@@ -8,6 +8,7 @@ type Option func(*clientOptions)
 type clientOptions struct {
 	accessKey  *string
 	secretKey  *string
+	baseURL    string
 	httpClient *http.Client
 	lookupEnv  func(string) (string, bool)
 }
@@ -25,6 +26,15 @@ func WithAccessKey(accessKey string) Option {
 // ConfigurationError.
 func WithSecretKey(secretKey string) Option {
 	return func(options *clientOptions) { options.secretKey = &secretKey }
+}
+
+// WithBaseURL sets the base URL of another server to send requests to, such as
+// your own proxy or a mock server. Captures go to the base URL plus
+// /v1/capture, and BuildCaptureURL builds URLs on it. Without it, or with "",
+// NewClient reads SCREENSHOTSCOUT_BASE_URL, and without that the client uses
+// the Screenshot Scout API.
+func WithBaseURL(baseURL string) Option {
+	return func(options *clientOptions) { options.baseURL = baseURL }
 }
 
 // WithHTTPClient sets the http.Client that sends API requests. Without it, or
