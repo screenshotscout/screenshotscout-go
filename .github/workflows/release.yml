@@ -1,0 +1,129 @@
+# Releases github.com/screenshotscout/screenshotscout-go when a vX.Y.Z tag is pushed.
+# Go has no registry upload: pushing the tag is the release. This workflow asks the
+# Go module proxy for the new version, waits until it's served, then creates the
+# GitHub release from the tag message's body.
+#
+# Because the tag push is the release, run this by hand on main with the new
+# version first (Actions > Release > Run workflow): it runs go vet and the tests,
+# checks the version, and changes nothing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Dry run only: the version you're about to tag (for example 1.2.3), to check it"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MODULE: github.com/screenshotscout/screenshotscout-go
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - run: go vet ./...
+      - run: go test ./...
+
+      - name: Check the version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then tag="$GITHUB_REF_NAME"; elif [[ -n "$INPUT_VERSION" ]]; then tag="v$INPUT_VERSION"; else exit 0; fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$tag isn't a vX.Y.Z version."
+            exit 1
+          fi
+          # From v2 on, Go needs the major version in the module path (module .../v2).
+          major="${tag#v}"; major="${major%%.*}"
+          if (( major >= 2 )) && ! grep -qE "^module .*/v${major}\$" go.mod; then
+            echo "::error::$tag is major version $major, but go.mod's module path doesn't end in /v${major}."
+            exit 1
+          fi
+          git fetch --force --tags --quiet origin
+          previous="$(git tag --list 'v*' --sort=-v:refname | grep -vx -- "$tag" | grep -v -- '-' | head -n 1 || true)"
+          if [[ -n "$previous" && "$(printf '%s\n%s\n' "$previous" "$tag" | sort -V | tail -n 1)" != "$tag" ]]; then
+            echo "::error::$tag isn't higher than the latest release, $previous."
+            exit 1
+          fi
+          echo "$tag follows ${previous:-no earlier release}."
+
+      - name: Read the release notes from the tag
+        if: github.event_name == 'push'
+        run: |
+          # Fetch the tag object itself, so an annotated tag stays annotated.
+          git fetch --force --no-tags origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          if [[ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != "tag" ]]; then
+            echo "::error::${GITHUB_REF_NAME} isn't an annotated tag, so it has no release notes. Create it with git tag -a."
+            exit 1
+          fi
+          git for-each-ref "refs/tags/${GITHUB_REF_NAME}" --format='%(contents:body)' > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::Tag ${GITHUB_REF_NAME} has no release notes. Write them in the tag message, below the subject line."
+            exit 1
+          fi
+          cat release-notes.md
+
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      # Requesting the version makes the proxy fetch the tag; pkg.go.dev follows within minutes.
+      - name: Wait until the Go module proxy serves the new version
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS "https://proxy.golang.org/${MODULE}/@v/${GITHUB_REF_NAME}.info"; then
+              echo
+              echo "${MODULE} ${GITHUB_REF_NAME} is live on the Go module proxy."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::${MODULE} ${GITHUB_REF_NAME} isn't on proxy.golang.org after 10 minutes."
+          exit 1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "The GitHub release for $GITHUB_REF_NAME already exists."
+            exit 0
+          fi
+          flags=()
+          if [[ "$version" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Screenshot Scout Go SDK $version" --notes-file release-notes.md "${flags[@]}"
