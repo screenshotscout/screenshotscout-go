@@ -17,6 +17,7 @@ const (
 	CaptureFormatGIF  CaptureFormat = "gif"
 	CaptureFormatJPEG CaptureFormat = "jpeg"
 	CaptureFormatJPG  CaptureFormat = "jpg"
+	CaptureFormatMD   CaptureFormat = "md"
 	CaptureFormatPDF  CaptureFormat = "pdf"
 	CaptureFormatPNG  CaptureFormat = "png"
 	CaptureFormatTIFF CaptureFormat = "tiff"
@@ -239,6 +240,10 @@ type BinaryCaptureResponse struct {
 	ScreenshotURL          *string
 	ScreenshotURLExpiresAt *string
 	CacheStatus            *string
+
+	// Markdown is the body decoded as UTF-8 text when the content type is
+	// text/markdown, and nil otherwise.
+	Markdown *string
 }
 
 // JSONCaptureResponse contains a decoded JSON capture result.

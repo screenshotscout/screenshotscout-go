@@ -82,6 +82,9 @@ func decodeBinaryResponse(rawResponse RawResponse) *CaptureResponse {
 		ScreenshotURLExpiresAt: firstHeader(rawResponse.Headers, "Screenshot-Scout-Screenshot-URL-Expires-At"),
 		CacheStatus:            firstHeader(rawResponse.Headers, "Screenshot-Scout-Cache-Status"),
 	}
+	if isMarkdownMediaType(rawResponse.ContentType) {
+		binary.Markdown = stringPointer(strings.ToValidUTF8(string(rawResponse.Body), "\uFFFD"))
+	}
 	return &CaptureResponse{
 		Kind:        CaptureResponseKindBinary,
 		Binary:      binary,
@@ -177,4 +180,10 @@ func isJSONMediaType(contentType string) bool {
 	mediaType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
 	mediaType = strings.ToLower(mediaType)
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+}
+
+func isMarkdownMediaType(contentType string) bool {
+	mediaType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "text/markdown"
 }

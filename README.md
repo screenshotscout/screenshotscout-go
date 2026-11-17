@@ -58,6 +58,28 @@ func main() {
 
 `Capture` uses POST by default, or GET when the client has a secret key. An omitted `ResponseType`, or an explicit `CaptureResponseTypeBinary`, expects a binary response.
 
+## Get a page as Markdown
+
+Set `Format` to `CaptureFormatMD` to get the page as Markdown:
+
+```go
+format := screenshotscout.CaptureFormatMD
+response, err := client.Capture(
+	context.Background(),
+	"https://example.com",
+	&screenshotscout.CaptureOptions{Format: &format},
+)
+if err != nil {
+	log.Fatal(err)
+}
+if response.Binary == nil || response.Binary.Markdown == nil {
+	log.Fatal("Screenshot Scout returned a non-Markdown response")
+}
+fmt.Println(*response.Binary.Markdown)
+```
+
+`BinaryCaptureResponse.Markdown` points to the Markdown text, and is `nil` for other formats.
+
 ## Request a JSON result
 
 ```go

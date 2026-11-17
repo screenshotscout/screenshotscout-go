@@ -844,6 +844,9 @@ func TestBinaryResponseRetainsBytesMetadataAndRawResponse(t *testing.T) {
 	if result.Binary.CacheStatus == nil || *result.Binary.CacheStatus != "HIT" {
 		t.Fatalf("unexpected cache status: %v", result.Binary.CacheStatus)
 	}
+	if result.Binary.Markdown != nil {
+		t.Fatalf("Markdown set for a non-Markdown response: %q", *result.Binary.Markdown)
+	}
 	if result.RawResponse.StatusCode != http.StatusCreated || result.RawResponse.Status != "201 Created" {
 		t.Fatalf("unexpected status: %#v", result.RawResponse)
 	}
@@ -852,6 +855,48 @@ func TestBinaryResponseRetainsBytesMetadataAndRawResponse(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result.RawResponse.Headers.Values("Set-Cookie"), []string{"a=1; Path=/", "b=2; Path=/"}) {
 		t.Fatalf("unexpected multi-value headers: %#v", result.RawResponse.Headers)
+	}
+}
+
+func TestMarkdownResponseRetainsBytesAndDecodesTheText(t *testing.T) {
+	t.Parallel()
+
+	const markdown = "# Привет\n\nHello, world.\n"
+	tests := []struct {
+		name        string
+		contentType string
+	}{
+		{name: "with charset", contentType: "text/markdown; charset=utf-8"},
+		{name: "uppercase", contentType: "TEXT/MARKDOWN"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			httpClient, _ := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", test.contentType, []byte(markdown), nil)
+			})
+			client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			result, err := client.Capture(context.Background(), "https://example.com", &CaptureOptions{Format: pointer(CaptureFormatMD)})
+			if err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			if result.Kind != CaptureResponseKindBinary || result.Binary == nil || result.JSON != nil {
+				t.Fatalf("invalid discriminated response: %#v", result)
+			}
+			if result.Binary.Markdown == nil || *result.Binary.Markdown != markdown {
+				t.Fatalf("unexpected Markdown: %v", result.Binary.Markdown)
+			}
+			if !bytes.Equal(result.Binary.Bytes, []byte(markdown)) {
+				t.Fatalf("unexpected bytes: %v", result.Binary.Bytes)
+			}
+			if result.RawResponse.ContentType != test.contentType {
+				t.Fatalf("unexpected content type: %q", result.RawResponse.ContentType)
+			}
+		})
 	}
 }
 
