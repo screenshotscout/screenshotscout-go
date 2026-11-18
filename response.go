@@ -85,6 +85,9 @@ func decodeBinaryResponse(rawResponse RawResponse) *CaptureResponse {
 	if isMarkdownMediaType(rawResponse.ContentType) {
 		binary.Markdown = stringPointer(strings.ToValidUTF8(string(rawResponse.Body), "\uFFFD"))
 	}
+	if isHTMLMediaType(rawResponse.ContentType) {
+		binary.HTML = stringPointer(strings.ToValidUTF8(string(rawResponse.Body), "\uFFFD"))
+	}
 	return &CaptureResponse{
 		Kind:        CaptureResponseKindBinary,
 		Binary:      binary,
@@ -186,4 +189,10 @@ func isMarkdownMediaType(contentType string) bool {
 	mediaType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
 	mediaType = strings.ToLower(mediaType)
 	return mediaType == "text/markdown"
+}
+
+func isHTMLMediaType(contentType string) bool {
+	mediaType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+	mediaType = strings.ToLower(mediaType)
+	return mediaType == "text/html"
 }

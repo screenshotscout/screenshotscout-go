@@ -15,6 +15,7 @@ type CaptureFormat string
 
 const (
 	CaptureFormatGIF  CaptureFormat = "gif"
+	CaptureFormatHTML CaptureFormat = "html"
 	CaptureFormatJPEG CaptureFormat = "jpeg"
 	CaptureFormatJPG  CaptureFormat = "jpg"
 	CaptureFormatMD   CaptureFormat = "md"
@@ -244,6 +245,10 @@ type BinaryCaptureResponse struct {
 	// Markdown is the body decoded as UTF-8 text when the content type is
 	// text/markdown, and nil otherwise.
 	Markdown *string
+
+	// HTML is the body decoded as UTF-8 text when the content type is
+	// text/html, and nil otherwise.
+	HTML *string
 }
 
 // JSONCaptureResponse contains a decoded JSON capture result.

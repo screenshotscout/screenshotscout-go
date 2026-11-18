@@ -847,6 +847,9 @@ func TestBinaryResponseRetainsBytesMetadataAndRawResponse(t *testing.T) {
 	if result.Binary.Markdown != nil {
 		t.Fatalf("Markdown set for a non-Markdown response: %q", *result.Binary.Markdown)
 	}
+	if result.Binary.HTML != nil {
+		t.Fatalf("HTML set for a non-HTML response: %q", *result.Binary.HTML)
+	}
 	if result.RawResponse.StatusCode != http.StatusCreated || result.RawResponse.Status != "201 Created" {
 		t.Fatalf("unexpected status: %#v", result.RawResponse)
 	}
@@ -890,7 +893,55 @@ func TestMarkdownResponseRetainsBytesAndDecodesTheText(t *testing.T) {
 			if result.Binary.Markdown == nil || *result.Binary.Markdown != markdown {
 				t.Fatalf("unexpected Markdown: %v", result.Binary.Markdown)
 			}
+			if result.Binary.HTML != nil {
+				t.Fatalf("HTML set for a Markdown response: %q", *result.Binary.HTML)
+			}
 			if !bytes.Equal(result.Binary.Bytes, []byte(markdown)) {
+				t.Fatalf("unexpected bytes: %v", result.Binary.Bytes)
+			}
+			if result.RawResponse.ContentType != test.contentType {
+				t.Fatalf("unexpected content type: %q", result.RawResponse.ContentType)
+			}
+		})
+	}
+}
+
+func TestHTMLResponseRetainsBytesAndDecodesTheText(t *testing.T) {
+	t.Parallel()
+
+	const html = "<!DOCTYPE html><html><body><h1>Привет</h1><p>Hello, world.</p></body></html>"
+	tests := []struct {
+		name        string
+		contentType string
+	}{
+		{name: "with charset", contentType: "text/html; charset=utf-8"},
+		{name: "uppercase with charset", contentType: "TEXT/HTML; charset=UTF-8"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			httpClient, _ := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", test.contentType, []byte(html), nil)
+			})
+			client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			result, err := client.Capture(context.Background(), "https://example.com", &CaptureOptions{Format: pointer(CaptureFormatHTML)})
+			if err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			if result.Kind != CaptureResponseKindBinary || result.Binary == nil || result.JSON != nil {
+				t.Fatalf("invalid discriminated response: %#v", result)
+			}
+			if result.Binary.HTML == nil || *result.Binary.HTML != html {
+				t.Fatalf("unexpected HTML: %v", result.Binary.HTML)
+			}
+			if result.Binary.Markdown != nil {
+				t.Fatalf("Markdown set for an HTML response: %q", *result.Binary.Markdown)
+			}
+			if !bytes.Equal(result.Binary.Bytes, []byte(html)) {
 				t.Fatalf("unexpected bytes: %v", result.Binary.Bytes)
 			}
 			if result.RawResponse.ContentType != test.contentType {
