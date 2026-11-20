@@ -83,6 +83,43 @@ if result.ScreenshotURL != nil {
 
 `CaptureResponse.Kind` is either `CaptureResponseKindBinary` or `CaptureResponseKindJSON`, and exactly one of `CaptureResponse.Binary` and `CaptureResponse.JSON` is non-nil.
 
+## Capture from HTML
+
+To render HTML you generated, such as an invoice or a report, call `CaptureFromHTML` with the document instead of a URL. It takes the same options as `Capture`:
+
+```go
+html := `<!doctype html>
+<html>
+  <head>
+    <title>Invoice #1042</title>
+  </head>
+  <body>
+    <h1>Invoice #1042</h1>
+    <p>Total due: $480.00</p>
+  </body>
+</html>`
+
+format := screenshotscout.CaptureFormatPDF
+response, err := client.CaptureFromHTML(
+	context.Background(),
+	html,
+	&screenshotscout.CaptureOptions{Format: &format},
+)
+if err != nil {
+	log.Fatal(err)
+}
+if response.Binary == nil {
+	log.Fatal("Screenshot Scout returned a non-binary response")
+}
+if err := os.WriteFile("invoice.pdf", response.Binary.Bytes, 0o600); err != nil {
+	log.Fatal(err)
+}
+```
+
+Send a complete document that starts with `<!doctype html>`. A PDF takes its title from `<title>`. The page has no URL, so use absolute URLs for images, stylesheets and fonts, or add a `<base href>`. See [How to Render HTML](https://screenshotscout.com/docs/guides/render-html) for more.
+
+The HTML is sent in a POST request, which can't be signed. So `CaptureFromHTML` needs a client without a secret key, and an API key that doesn't require signed requests.
+
 ## Use GET
 
 POST is the default, or GET when the client has a secret key. Pass `CaptureHTTPMethodGET` as the final argument to use GET for a call:

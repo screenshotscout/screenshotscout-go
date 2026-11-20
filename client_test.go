@@ -1824,3 +1824,325 @@ func TestMalformedBaseURLFailsThroughTheExistingErrorPaths(t *testing.T) {
 		})
 	}
 }
+
+// invoiceHTML has the characters a JSON encoder can escape: <, >, &,
+// quotation marks, line breaks and non-ASCII letters.
+const invoiceHTML = "<!doctype html>\n<html><head><title>Invoice #1042</title></head><body><h1>Invoice #1042 for Zoë & \"Café\"</h1></body></html>\n"
+
+// jsonObjectKeys returns the keys of a JSON object in the order they're written.
+func jsonObjectKeys(t *testing.T, body []byte) []string {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		t.Fatalf("body is not a JSON object: %s", body)
+	}
+	var keys []string
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			t.Fatalf("read a key: %v", err)
+		}
+		key, ok := token.(string)
+		if !ok {
+			t.Fatalf("unexpected key token: %v", token)
+		}
+		keys = append(keys, key)
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			t.Fatalf("read the value of %q: %v", key, err)
+		}
+	}
+	return keys
+}
+
+func TestCaptureFromHTMLSendsTheHTMLFirstInAPOSTBodyExactlyAsGiven(t *testing.T) {
+	t.Parallel()
+
+	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+		return response(http.StatusOK, "200 OK", "application/pdf", []byte("%PDF"), nil)
+	})
+	client, err := NewClient(WithAccessKey("ak_test"), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	html := "  " + invoiceHTML + "  "
+	_, err = client.CaptureFromHTML(context.Background(), html, &CaptureOptions{
+		Format:             pointer(CaptureFormatPDF),
+		PDFPrintBackground: pointer(true),
+		Cookies:            []string{"session=abc; Domain=example.com"},
+	})
+	if err != nil {
+		t.Fatalf("CaptureFromHTML: %v", err)
+	}
+	if len(*requests) != 1 {
+		t.Fatalf("expected one request, got %d", len(*requests))
+	}
+	recorded := (*requests)[0]
+	if recorded.method != http.MethodPost {
+		t.Fatalf("expected POST, got %s", recorded.method)
+	}
+	if recorded.url != defaultCaptureEndpointURL {
+		t.Fatalf("unexpected URL, want no query string: %s", recorded.url)
+	}
+	if recorded.header.Get("Authorization") != "Bearer ak_test" {
+		t.Fatalf("unexpected authorization: %s", recorded.header.Get("Authorization"))
+	}
+	if recorded.header.Get("Content-Type") != "application/json" {
+		t.Fatalf("unexpected content type: %s", recorded.header.Get("Content-Type"))
+	}
+	if keys, want := jsonObjectKeys(t, recorded.body), []string{"html", "format", "cookies", "pdf_print_background"}; !slices.Equal(keys, want) {
+		t.Fatalf("body keys = %q, want %q", keys, want)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorded.body, &body); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	expected := map[string]any{
+		"html":                 html,
+		"format":               "pdf",
+		"cookies":              []any{"session=abc; Domain=example.com"},
+		"pdf_print_background": true,
+	}
+	if !reflect.DeepEqual(body, expected) {
+		t.Fatalf("unexpected POST body\nactual: %#v\nexpected: %#v", body, expected)
+	}
+}
+
+// The raw bodies are compared exactly: <, > and & aren't written as \u
+// escapes, non-ASCII letters are written as they are, and the body doesn't end
+// with the newline that json.Encoder appends.
+func TestPOSTBodiesWriteHTMLCharactersAndNonASCIILettersAsTheyAre(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		capture func(*Client) (*CaptureResponse, error)
+		want    string
+	}{
+		{
+			name: "Capture",
+			capture: func(client *Client) (*CaptureResponse, error) {
+				return client.Capture(context.Background(), "https://example.com/?q=<b>&lang=fr", &CaptureOptions{
+					InjectJS: []string{"document.title = 'Zoë & Café <3>';"},
+				})
+			},
+			want: `{"url":"https://example.com/?q=<b>&lang=fr","inject_js":["document.title = 'Zoë & Café <3>';"]}`,
+		},
+		{
+			name: "CaptureFromHTML",
+			capture: func(client *Client) (*CaptureResponse, error) {
+				return client.CaptureFromHTML(context.Background(), invoiceHTML, &CaptureOptions{Format: pointer(CaptureFormatPDF)})
+			},
+			want: `{"html":"<!doctype html>\n<html><head><title>Invoice #1042</title></head><body><h1>Invoice #1042 for Zoë & \"Café\"</h1></body></html>\n","format":"pdf"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+				return response(http.StatusOK, "200 OK", "image/png", []byte{1}, nil)
+			})
+			client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			if _, err := test.capture(client); err != nil {
+				t.Fatalf("%s: %v", test.name, err)
+			}
+			if body := string((*requests)[0].body); body != test.want {
+				t.Fatalf("body = %s\nwant   %s", body, test.want)
+			}
+		})
+	}
+}
+
+func TestCaptureFromHTMLWithSecretKeyFailsBeforeTransport(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		keys        []Option
+		environment map[string]string
+		message     string
+	}{
+		{
+			name:    "secret key passed",
+			keys:    []Option{WithAccessKey("ak_test"), WithSecretKey("sk_test")},
+			message: "CaptureFromHTML sends the HTML in a POST body, which can't be signed. This client has a secret key: use a client without a secret key and an API key that doesn't require signed requests.",
+		},
+		{
+			name: "secret key from the environment",
+			environment: map[string]string{
+				"SCREENSHOTSCOUT_ACCESS_KEY": "ak_test",
+				"SCREENSHOTSCOUT_SECRET_KEY": "sk_test",
+			},
+			message: "CaptureFromHTML sends the HTML in a POST body, which can't be signed. This client has a secret key from SCREENSHOTSCOUT_SECRET_KEY: use a client without a secret key and an API key that doesn't require signed requests.",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return response(http.StatusOK, "200 OK", "application/pdf", []byte("%PDF"), nil), nil
+			})}
+			lookupEnv, _ := fakeEnvironment(test.environment)
+			client, err := NewClient(append([]Option{withLookupEnv(lookupEnv), WithHTTPClient(httpClient)}, test.keys...)...)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			result, err := client.CaptureFromHTML(context.Background(), invoiceHTML, &CaptureOptions{Format: pointer(CaptureFormatPDF)})
+			if result != nil {
+				t.Fatalf("expected no response, got %#v", result)
+			}
+			if message := configurationErrorMessage(t, err); message != test.message {
+				t.Fatalf("message = %q, want %q", message, test.message)
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("CaptureFromHTML with a secret key reached transport %d times", calls.Load())
+			}
+		})
+	}
+}
+
+func TestCaptureFromHTMLChecksOnlyThatTheHTMLIsValidUTF8(t *testing.T) {
+	t.Parallel()
+
+	httpClient, requests := recordingHTTPClient(t, func() *http.Response {
+		return response(http.StatusOK, "200 OK", "application/pdf", []byte("%PDF"), nil)
+	})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for _, html := range []string{"\xff", "<p>caf\xc3</p>"} {
+		_, err := client.CaptureFromHTML(context.Background(), html, nil)
+		var serializationError *SerializationError
+		if !errors.As(err, &serializationError) || !errors.Is(err, ErrSerialization) {
+			t.Fatalf("expected SerializationError for %q, got %v", html, err)
+		}
+		if serializationError.Option != "html" {
+			t.Fatalf("option = %q, want html", serializationError.Option)
+		}
+		if want := "The HTML to capture must contain valid UTF-8 text."; serializationError.Message != want {
+			t.Fatalf("message = %q, want %q", serializationError.Message, want)
+		}
+	}
+	if len(*requests) != 0 {
+		t.Fatalf("invalid HTML reached transport %d times", len(*requests))
+	}
+
+	// Empty HTML is the API's to judge.
+	if _, err := client.CaptureFromHTML(context.Background(), "", nil); err != nil {
+		t.Fatalf("CaptureFromHTML: %v", err)
+	}
+	if body := string((*requests)[0].body); body != `{"html":""}` {
+		t.Fatalf("unexpected body: %s", body)
+	}
+}
+
+func TestCaptureFromHTMLDecodesResponsesTheSameWayAsCapture(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Screenshot-Scout-Screenshot-URL", "https://cdn.example.com/invoice.pdf")
+	pdf := []byte("%PDF-1.7")
+	httpClient, _ := recordingHTTPClient(t, func() *http.Response {
+		return response(http.StatusOK, "200 OK", "application/pdf", pdf, headers)
+	})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.CaptureFromHTML(context.Background(), invoiceHTML, &CaptureOptions{Format: pointer(CaptureFormatPDF)})
+	if err != nil {
+		t.Fatalf("CaptureFromHTML: %v", err)
+	}
+	if result.Kind != CaptureResponseKindBinary || result.Binary == nil || result.JSON != nil {
+		t.Fatalf("invalid discriminated response: %#v", result)
+	}
+	if !bytes.Equal(result.Binary.Bytes, pdf) {
+		t.Fatalf("unexpected bytes: %q", result.Binary.Bytes)
+	}
+	if result.Binary.ScreenshotURL == nil || *result.Binary.ScreenshotURL != "https://cdn.example.com/invoice.pdf" {
+		t.Fatalf("unexpected screenshot URL: %v", result.Binary.ScreenshotURL)
+	}
+	if result.RawResponse.StatusCode != http.StatusOK || result.RawResponse.ContentType != "application/pdf" {
+		t.Fatalf("unexpected raw response: %#v", result.RawResponse)
+	}
+}
+
+func TestCaptureFromHTMLCancellationAndDeadlineAreNotWrapped(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = client.CaptureFromHTML(canceled, invoiceHTML, nil)
+	if err != context.Canceled {
+		t.Fatalf("expected direct context.Canceled, got %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("pre-canceled context called the transport")
+	}
+
+	deadlineContext, deadlineCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer deadlineCancel()
+	_, err = client.CaptureFromHTML(deadlineContext, invoiceHTML, nil)
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected direct context.DeadlineExceeded, got %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("unexpected transport calls: %d", calls.Load())
+	}
+}
+
+func TestRequestTooLargeArrivesAsAnAPIError(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"error_code":"request_too_large","error_message":"The request body must be at most 5 MB."}`)
+	httpClient, _ := recordingHTTPClient(t, func() *http.Response {
+		return response(http.StatusRequestEntityTooLarge, "413 Request Entity Too Large", "application/json", body, nil)
+	})
+	client, err := NewClient(WithAccessKey("key"), WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.CaptureFromHTML(context.Background(), invoiceHTML, nil)
+	if !errors.Is(err, ErrAPI) || errors.Is(err, ErrTransport) {
+		t.Fatalf("expected an API error, got %v", err)
+	}
+	var apiError *APIError
+	if !errors.As(err, &apiError) {
+		t.Fatalf("expected APIError, got %T", err)
+	}
+	if apiError.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("unexpected status: %d", apiError.StatusCode)
+	}
+	if apiError.ErrorCode == nil || *apiError.ErrorCode != "request_too_large" {
+		t.Fatalf("unexpected error code: %v", apiError.ErrorCode)
+	}
+	if apiError.ErrorMessage == nil || *apiError.ErrorMessage != "The request body must be at most 5 MB." {
+		t.Fatalf("unexpected error message: %v", apiError.ErrorMessage)
+	}
+	if apiError.RawResponse.ContentType != "application/json" || !bytes.Equal(apiError.RawResponse.Body, body) {
+		t.Fatalf("raw response not retained: %#v", apiError.RawResponse)
+	}
+}

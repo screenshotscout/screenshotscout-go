@@ -35,8 +35,8 @@ type Client struct {
 // it reads SCREENSHOTSCOUT_ACCESS_KEY and, if it's set,
 // SCREENSHOTSCOUT_SECRET_KEY. Passing either key means neither variable is
 // read. Without WithBaseURL, it reads SCREENSHOTSCOUT_BASE_URL. The access key
-// is sent in the Authorization header for Capture calls, and a secret key
-// signs capture requests and capture URLs.
+// is sent in the Authorization header for Capture and CaptureFromHTML calls,
+// and a secret key signs capture requests and capture URLs.
 func NewClient(options ...Option) (*Client, error) {
 	configuration := clientOptions{lookupEnv: os.LookupEnv}
 	for _, option := range options {
@@ -151,14 +151,51 @@ func (client *Client) Capture(
 		return nil, err
 	}
 	if captureMethod == CaptureHTTPMethodPOST && client.secretKey != "" {
-		source := ""
-		if client.secretKeyFromEnvironment {
-			source = " from " + secretKeyVariable
-		}
 		return nil, &ConfigurationError{
-			Message: "POST requests can't be signed. This client has a secret key" + source + ": send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests.",
+			Message: "POST requests can't be signed. This client has a secret key" + client.secretKeySource() + ": send this capture with method GET, or use a client without a secret key and an API key that doesn't require signed requests.",
 		}
 	}
+	return client.send(ctx, captureMethod, serialized, expectedKind(options))
+}
+
+// CaptureFromHTML captures an HTML document instead of a URL, such as an
+// invoice or a report you generated, and waits for the final buffered
+// response. It takes the same options as Capture. The HTML is sent exactly as
+// given, in a POST request. POST requests can't be signed, so a client with a
+// secret key returns a ConfigurationError without sending a request.
+// Cancellation follows the supplied context's normal semantics.
+func (client *Client) CaptureFromHTML(
+	ctx context.Context,
+	html string,
+	options *CaptureOptions,
+) (*CaptureResponse, error) {
+	if ctx == nil {
+		return nil, &SerializationError{
+			Message: "A non-nil context.Context is required.",
+			Option:  "context",
+		}
+	}
+
+	serialized, err := serializeHTMLCaptureOptions(html, options)
+	if err != nil {
+		return nil, err
+	}
+	if client.secretKey != "" {
+		return nil, &ConfigurationError{
+			Message: "CaptureFromHTML sends the HTML in a POST body, which can't be signed. This client has a secret key" + client.secretKeySource() + ": use a client without a secret key and an API key that doesn't require signed requests.",
+		}
+	}
+	return client.send(ctx, CaptureHTTPMethodPOST, serialized, expectedKind(options))
+}
+
+// send performs one capture request with the given method and decodes the
+// buffered response.
+func (client *Client) send(
+	ctx context.Context,
+	captureMethod CaptureHTTPMethod,
+	serialized serializedCaptureOptions,
+	expected expectedResponseKind,
+) (*CaptureResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -226,7 +263,7 @@ func (client *Client) Capture(
 	if rawResponse.StatusCode < 200 || rawResponse.StatusCode > 299 {
 		return nil, createAPIError(rawResponse)
 	}
-	return decodeSuccessResponse(rawResponse, expectedKind(options))
+	return decodeSuccessResponse(rawResponse, expected)
 }
 
 // BuildCaptureURL constructs a sensitive GET capture URL without making an
@@ -255,6 +292,15 @@ func (client *Client) createSignature(pairs []wirePair) string {
 	mac := hmac.New(sha256.New, []byte(client.secretKey))
 	_, _ = mac.Write([]byte(canonicalQuery))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// secretKeySource names SCREENSHOTSCOUT_SECRET_KEY when the secret key came
+// from it, for the errors that refuse a POST request.
+func (client *Client) secretKeySource() string {
+	if !client.secretKeyFromEnvironment {
+		return ""
+	}
+	return " from " + secretKeyVariable
 }
 
 // baseURLSource returns a sentence naming SCREENSHOTSCOUT_BASE_URL when the

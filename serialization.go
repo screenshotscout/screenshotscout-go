@@ -1,6 +1,7 @@
 package screenshotscout
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -17,14 +18,21 @@ type wirePair struct {
 	value string
 }
 
+// bodyField is one member of a POST body. The body keeps its fields in order,
+// because a map would be encoded with its keys sorted.
+type bodyField struct {
+	name  string
+	value any
+}
+
 type serializedCaptureOptions struct {
 	pairs []wirePair
-	body  map[string]any
+	body  []bodyField
 }
 
 type captureSerializer struct {
 	pairs []wirePair
-	body  map[string]any
+	body  []bodyField
 }
 
 func serializeCaptureOptions(targetURL string, options *CaptureOptions) (serializedCaptureOptions, error) {
@@ -34,10 +42,29 @@ func serializeCaptureOptions(targetURL string, options *CaptureOptions) (seriali
 			Option:  "url",
 		}
 	}
+	return serializeTargetAndOptions(wirePair{name: "url", value: targetURL}, options)
+}
 
+// serializeHTMLCaptureOptions serializes an HTML document in place of a URL.
+// The HTML is kept exactly as given: only invalid UTF-8 is refused, because
+// JSON can't carry it unchanged.
+func serializeHTMLCaptureOptions(html string, options *CaptureOptions) (serializedCaptureOptions, error) {
+	if !utf8.ValidString(html) {
+		return serializedCaptureOptions{}, &SerializationError{
+			Message: "The HTML to capture must contain valid UTF-8 text.",
+			Option:  "html",
+		}
+	}
+	return serializeTargetAndOptions(wirePair{name: "html", value: html}, options)
+}
+
+// serializeTargetAndOptions writes the target, a page's URL or an HTML
+// document, first and then the options, in the same order for the query
+// string and the POST body.
+func serializeTargetAndOptions(target wirePair, options *CaptureOptions) (serializedCaptureOptions, error) {
 	serializer := &captureSerializer{
-		pairs: []wirePair{{name: "url", value: targetURL}},
-		body:  map[string]any{"url": targetURL},
+		pairs: []wirePair{target},
+		body:  []bodyField{{name: target.name, value: target.value}},
 	}
 	if options == nil {
 		return serializedCaptureOptions{pairs: serializer.pairs, body: serializer.body}, nil
@@ -215,7 +242,7 @@ func appendStringOption[T ~string](serializer *captureSerializer, property, wire
 		}
 	}
 	serializer.pairs = append(serializer.pairs, wirePair{name: wireName, value: text})
-	serializer.body[wireName] = text
+	serializer.body = append(serializer.body, bodyField{name: wireName, value: text})
 	return nil
 }
 
@@ -234,7 +261,7 @@ func (serializer *captureSerializer) appendRepeated(property, wireName string, v
 		copyOfValues[index] = value
 		serializer.pairs = append(serializer.pairs, wirePair{name: wireName, value: value})
 	}
-	serializer.body[wireName] = copyOfValues
+	serializer.body = append(serializer.body, bodyField{name: wireName, value: copyOfValues})
 	return nil
 }
 
@@ -250,7 +277,7 @@ func (serializer *captureSerializer) appendInt(property, wireName string, value 
 		}
 	}
 	serializer.pairs = append(serializer.pairs, wirePair{name: wireName, value: strconv.FormatInt(integer, 10)})
-	serializer.body[wireName] = *value
+	serializer.body = append(serializer.body, bodyField{name: wireName, value: *value})
 	return nil
 }
 
@@ -269,7 +296,7 @@ func (serializer *captureSerializer) appendFloat(property, wireName string, valu
 	if bodyValue == 0 {
 		bodyValue = 0 // Match JavaScript query and JSON serialization for negative zero.
 	}
-	serializer.body[wireName] = bodyValue
+	serializer.body = append(serializer.body, bodyField{name: wireName, value: bodyValue})
 	return nil
 }
 
@@ -278,7 +305,7 @@ func (serializer *captureSerializer) appendBool(_ string, wireName string, value
 		return
 	}
 	serializer.pairs = append(serializer.pairs, wirePair{name: wireName, value: strconv.FormatBool(*value)})
-	serializer.body[wireName] = *value
+	serializer.body = append(serializer.body, bodyField{name: wireName, value: *value})
 }
 
 // resolveCaptureHTTPMethod returns the method the caller passed, or
@@ -371,13 +398,37 @@ func ecmaScriptNumberString(value float64) string {
 	return fmt.Sprintf("%se%d", mantissa, exponent)
 }
 
-func encodeJSONBody(body map[string]any) ([]byte, error) {
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return nil, &SerializationError{
-			Message: "The POST capture body could not be serialized as JSON.",
-			Cause:   err,
+// encodeJSONBody writes the fields as one JSON object, in order. The body goes
+// to the API and is never put into a web page, so <, > and & are written as
+// they are rather than as \u escapes, which would only make the body bigger.
+func encodeJSONBody(fields []bodyField) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	encode := func(value any) error {
+		if err := encoder.Encode(value); err != nil {
+			return &SerializationError{
+				Message: "The POST capture body could not be serialized as JSON.",
+				Cause:   err,
+			}
+		}
+		buffer.Truncate(buffer.Len() - 1) // Encode appends a newline.
+		return nil
+	}
+
+	buffer.WriteByte('{')
+	for index, field := range fields {
+		if index > 0 {
+			buffer.WriteByte(',')
+		}
+		if err := encode(field.name); err != nil {
+			return nil, err
+		}
+		buffer.WriteByte(':')
+		if err := encode(field.value); err != nil {
+			return nil, err
 		}
 	}
-	return encoded, nil
+	buffer.WriteByte('}')
+	return buffer.Bytes(), nil
 }

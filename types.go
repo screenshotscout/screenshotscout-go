@@ -105,8 +105,8 @@ const (
 	CaptureStorageModeManaged  CaptureStorageMode = "managed"
 )
 
-// CaptureOptions contains Screenshot Scout service options. URL, access_key,
-// signature, and the request HTTP method are deliberately separate.
+// CaptureOptions contains Screenshot Scout service options. URL, HTML,
+// access_key, signature, and the request HTTP method are deliberately separate.
 //
 // Pointer fields preserve the distinction between omission and explicit zero,
 // false, or an empty string. Empty repeated slices are omitted.
